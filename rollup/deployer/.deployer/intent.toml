@@ -1,0 +1,45 @@
+configType = "custom"
+l1ChainID = 31337
+fundDevAccounts = false
+l1ContractsLocator = "embedded"
+l2ContractsLocator = "embedded"
+
+# Anvil Seed 2 Accounts:
+# 0: 0x8995e44a22e303a79bdd2e6e41674fb92d620863 (deployer - private key: 0xd6a036f561e03196779dd34bf3d141dec4737eec5ed0416e413985ca05dad51a)
+# 1: 0xe9e05c9f02e10fa833d379cb1c7ac3a3f23b247e
+# 2: 0x61da7c7f97ebe53ad7c4e5ecd3d117e7ab430ea7
+# 3: 0x5b0248e30583ced4f09726c547935552c469eb24
+# 4: 0xcdbc8abb83e01bae13ece8853a5ca84b2ef6ca86
+# 5: 0xa683a3e33e07fb84ff33fce753da1d248298977f
+# 6: 0x008099bfee75e832e1b93d4c023f646d99d4c90f
+# 7: 0x38adcae107e9aed4c6dffa317d651e80ccce0857
+
+[superchainRoles]
+  SuperchainProxyAdminOwner = "0x8995e44a22e303a79bdd2e6e41674fb92d620863"
+  SuperchainGuardian = "0x8995e44a22e303a79bdd2e6e41674fb92d620863"
+  ProtocolVersionsOwner = "0x8995e44a22e303a79bdd2e6e41674fb92d620863"
+  Challenger = "0x8995e44a22e303a79bdd2e6e41674fb92d620863"
+
+[[chains]]
+  id = "0x000000000000000000000000000000000000000000000000000000000000a455"
+  baseFeeVaultRecipient = "0xe9e05c9f02e10fa833d379cb1c7ac3a3f23b247e"
+  l1FeeVaultRecipient = "0xe9e05c9f02e10fa833d379cb1c7ac3a3f23b247e"
+  sequencerFeeVaultRecipient = "0xe9e05c9f02e10fa833d379cb1c7ac3a3f23b247e"
+  operatorFeeVaultRecipient = "0xe9e05c9f02e10fa833d379cb1c7ac3a3f23b247e"
+  eip1559DenominatorCanyon = 250
+  eip1559Denominator = 50
+  eip1559Elasticity = 6
+  gasLimit = 60000000
+  operatorFeeScalar = 0
+  operatorFeeConstant = 0
+  chainFeesRecipient = "0xe9e05c9f02e10fa833d379cb1c7ac3a3f23b247e"
+  minBaseFee = 1000000
+  daFootprintGasScalar = 0
+  [chains.roles]
+    l1ProxyAdminOwner = "0x8995e44a22e303a79bdd2e6e41674fb92d620863"
+    l2ProxyAdminOwner = "0x8995e44a22e303a79bdd2e6e41674fb92d620863"
+    systemConfigOwner = "0x61da7c7f97ebe53ad7c4e5ecd3d117e7ab430ea7"
+    unsafeBlockSigner = "0x5b0248e30583ced4f09726c547935552c469eb24"
+    batcher = "0xcdbc8abb83e01bae13ece8853a5ca84b2ef6ca86"
+    proposer = "0xa683a3e33e07fb84ff33fce753da1d248298977f"
+    challenger = "0x008099bfee75e832e1b93d4c023f646d99d4c90f"

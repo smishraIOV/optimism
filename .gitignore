@@ -51,3 +51,15 @@ crytic-export
 
 # ignore local asdf config
 .tool-versions
+
+# Local rollup deployment
+rollup/op-geth/
+rollup/deployer/.deployer/state.json
+rollup/deployer/.deployer/genesis.json
+rollup/deployer/.deployer/rollup.json
+rollup/deployer/address/
+rollup/sequencer/genesis.json
+rollup/sequencer/rollup.json
+rollup/sequencer/jwt.txt
+rollup/sequencer/op-geth-data/
+rollup/sequencer/opnode_*/
