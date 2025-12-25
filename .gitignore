@@ -63,3 +63,4 @@ rollup/sequencer/rollup.json
 rollup/sequencer/jwt.txt
 rollup/sequencer/op-geth-data/
 rollup/sequencer/opnode_*/
+rollup/sequencer/opnode_p2p_priv.txt

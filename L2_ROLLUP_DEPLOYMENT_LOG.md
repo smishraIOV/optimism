@@ -82,14 +82,18 @@ mkdir -p rollup/sequencer/scripts
 **Terminal 1:**
 
 ```bash
-anvil --mnemonic-seed-unsafe 2 --hardfork cancun --block-time 1
+anvil --mnemonic-seed-unsafe 2 --hardfork cancun --block-time 15
 ```
 
 | Flag | Purpose |
 |------|---------|
 | `--mnemonic-seed-unsafe 2` | Deterministic accounts for reproducibility |
 | `--hardfork cancun` | Required for Ecotone/blob support |
-| `--block-time 1` | Auto-mine blocks every second (required for L2 sequencer) |
+| `--block-time 15` | Interval mining - similar to mainnet (~12s), ensures L2 can keep up |
+
+> **Tip:** To pause/resume interval mining (e.g., to let L2 catch up):
+> - Pause: `cast rpc evm_setIntervalMining 0 --rpc-url http://localhost:8545`
+> - Resume: `cast rpc evm_setIntervalMining 2 --rpc-url http://localhost:8545`
 
 **RPC URL:** `http://localhost:8545`
 **Chain ID:** `31337`
@@ -323,14 +327,31 @@ EOF
 ### 8.4 Initialize op-geth
 
 ```bash
-../../op-geth/build/bin/geth init --datadir op-geth-data genesis.json
+# Use --state.scheme=hash for archive mode compatibility
+../op-geth/build/bin/geth init --datadir op-geth-data --state.scheme=hash genesis.json
 ```
 
-**⚠️ Note the L2 genesis hash from the output!** You need to update `rollup.json` with this hash:
+**⚠️ Get the L2 genesis hash** (the init output truncates it):
 
 ```bash
-# Example: if geth init outputs "database=0xabc123..."
-# Update rollup.json genesis.l2.hash to match
+../op-geth/build/bin/geth --datadir op-geth-data console --exec 'eth.getBlock(0).hash' 2>/dev/null
+```
+
+Update `rollup.json` with this hash (replace `genesis.l2.hash` value).
+
+> **Note:** The genesis hash is deterministic - reinitializing with the same `genesis.json` will produce the same hash.
+
+#### Troubleshooting: State Scheme Mismatch
+
+If op-geth fails with:
+```
+Fatal: Failed to register the Ethereum service: incompatible state scheme, stored: path, provided: hash
+```
+
+Fix by cleaning and reinitializing:
+```bash
+rm -rf op-geth-data
+../op-geth/build/bin/geth init --datadir op-geth-data --state.scheme=hash genesis.json
 ```
 
 ### 8.5 Create start scripts
@@ -341,9 +362,10 @@ EOF
 cat > scripts/start-op-geth.sh << 'EOF'
 #!/bin/bash
 set -e
-source ../.env 2>/dev/null || source .env
+cd "$(dirname "$0")/.."
+source .env
 
-../../op-geth/build/bin/geth \
+../op-geth/build/bin/geth \
   --datadir=./op-geth-data \
   --http \
   --http.addr=0.0.0.0 \
@@ -376,9 +398,10 @@ chmod +x scripts/start-op-geth.sh
 cat > scripts/start-op-node.sh << 'EOF'
 #!/bin/bash
 set -e
-source ../.env 2>/dev/null || source .env
+cd "$(dirname "$0")/.."
+source .env
 
-../../optimism/op-node/bin/op-node \
+../../op-node/bin/op-node \
   --l1=$L1_RPC_URL \
   --l1.beacon.ignore=true \
   --l2=http://localhost:$OP_GETH_AUTH_PORT \
@@ -477,25 +500,33 @@ The tutorial assumes **Sepolia testnet**. For **local Anvil**, these modificatio
 
 ### Key Contract Addresses
 
-- **L1StandardBridgeProxy**: `0xd6b29bee80d0179928279fb18e3bb6bd3f63478e`
-- **OptimismPortalProxy**: `0x3659c8689e58aaae4ed4d97e9b0a46060932116e`
-- **L2StandardBridge (predeploy)**: `0x4200000000000000000000000000000000000010`
+Get addresses from the deployment state (these change each deployment):
+
+```bash
+cd rollup/deployer
+cat .deployer/state.json | grep -E "L1StandardBridgeProxy|OptimismPortalProxy"
+```
+
+- **L2StandardBridge (predeploy)**: `0x4200000000000000000000000000000000000010` (fixed address)
 
 ### L1 → L2 Deposit (Example)
 
 Deposit 1 ETH from L1 (Anvil) to L2:
 
 ```bash
+# Get the L1StandardBridgeProxy address from state.json
+L1_BRIDGE=$(cat rollup/deployer/.deployer/state.json | jq -r '.opChainDeployments[0].L1StandardBridgeProxy')
+
 # Using account #1 from Anvil
 ACCOUNT="0xE9e05C9f02e10FA833D379CB1c7aC3a3f23B247e"
 PRIVATE_KEY="0xbe62250c9db006c67c1595ff1f019bc849e2aa5c092dea0bf00883b39e54e904"
-L1_BRIDGE="0xd6b29bee80d0179928279fb18e3bb6bd3f63478e"
 
 # Deposit ETH via L1StandardBridge
 cast send $L1_BRIDGE "depositETH(uint32,bytes)" 100000 "0x" \
   --value 1ether \
   --private-key $PRIVATE_KEY \
   --rpc-url http://localhost:8545
+# Args: 100000 = L2 gas limit for deposit tx, "0x" = empty extra data
 
 # Mine L1 blocks to trigger L2 processing (Anvil only mines on-demand)
 for i in {1..20}; do
@@ -506,6 +537,14 @@ done
 # Check L2 balance
 cast balance $ACCOUNT --rpc-url http://localhost:9545 --ether
 ```
+
+> **Note:** The deposit won't appear on L2 immediately. The L2 sequencer must process the L1 block containing the deposit. Check sync status:
+> ```bash
+> curl -s -X POST -H "Content-Type: application/json" \
+>   --data '{"jsonrpc":"2.0","method":"optimism_syncStatus","params":[],"id":1}' \
+>   http://localhost:8547 | jq '.result.unsafe_l2.l1origin.number'
+> ```
+> Wait until this number is >= the L1 block where your deposit was made.
 
 ### L2 → L1 Withdrawal (Example)
 
@@ -545,6 +584,8 @@ cast send $L2_BRIDGE "withdraw(address,uint256,uint32,bytes)" \
 ## Deployment Gas Analysis
 
 Gas usage breakdown for deploying all L1 rollup contracts.
+
+**Note:** this was done with automine off, so each block is really a single transaction on anvil.
 
 ### Summary
 
@@ -675,8 +716,8 @@ Since Anvil runs in-memory by default, **all L1 state is lost on restart**. This
 ### Alternative: Persist Anvil State
 
 To avoid full redeployment, use Anvil's state persistence:
-- Start: `anvil --mnemonic-seed-unsafe 2 --hardfork cancun --block-time 1 --state anvil-state.json`
-- Restart: `anvil --mnemonic-seed-unsafe 2 --hardfork cancun --block-time 1 --load-state anvil-state.json`
+- Start: `anvil --mnemonic-seed-unsafe 2 --hardfork cancun --block-time 15 --state anvil-state.json`
+- Restart: `anvil --mnemonic-seed-unsafe 2 --hardfork cancun --block-time 15 --load-state anvil-state.json`
 
 ---
 
