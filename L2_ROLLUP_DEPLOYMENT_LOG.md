@@ -15,7 +15,7 @@ Following the tutorial: https://docs.optimism.io/chain-operators/tutorials/creat
 | 7. Build op-node and op-geth | ✅ Complete | op-geth v1.101511.1 |
 | 8. Configure and initialize sequencer | ✅ Complete | JWT, l1-chain-config, scripts |
 | 9. Start sequencer | ✅ Running | op-geth + op-node producing blocks |
-| 10. Spin up batcher | ⏳ Pending | |
+| 10. Spin up batcher | ✅ Complete | Posts L2 data to L1 |
 | 11. Spin up proposer | ⏳ Pending | |
 
 ---
@@ -721,11 +721,127 @@ To avoid full redeployment, use Anvil's state persistence:
 
 ---
 
+## Step 10: Spin Up Batcher
+
+Tutorial: https://docs.optimism.io/chain-operators/tutorials/create-l2-rollup/op-batcher-setup
+
+The batcher (`op-batcher`) submits L2 transaction batches to L1 for data availability.
+
+### 10.1 Build op-batcher
+
+```bash
+cd op-batcher
+just op-batcher
+cd ..
+```
+
+Binary: `op-batcher/bin/op-batcher`
+
+### 10.2 Create batcher directory
+
+```bash
+cd rollup
+mkdir -p batcher/scripts
+cd batcher
+
+# Copy state.json (for reference)
+cp ../deployer/.deployer/state.json .
+
+# Get BatchInbox address
+cat ../sequencer/rollup.json | jq -r '.batch_inbox_address'
+```
+
+### 10.3 Create .env file
+
+```bash
+cat > .env << 'EOF'
+# L1 Configuration (Anvil)
+L1_RPC_URL=http://localhost:8545
+
+# L2 Configuration
+L2_RPC_URL=http://localhost:9545
+ROLLUP_RPC_URL=http://localhost:8547
+
+# Contract addresses (from rollup.json batch_inbox_address)
+BATCH_INBOX_ADDRESS=<YOUR_BATCH_INBOX_ADDRESS>
+
+# Private key - Anvil account #4 (batcher role)
+BATCHER_PRIVATE_KEY=0x07127c605875395527bccbc5c74afa9dc1712d83ba5b12207bab86d3b7fa8be6
+
+# Batcher configuration
+POLL_INTERVAL=1s
+SUB_SAFETY_MARGIN=6
+NUM_CONFIRMATIONS=1
+SAFE_ABORT_NONCE_TOO_LOW_COUNT=3
+RESUBMISSION_TIMEOUT=30s
+MAX_CHANNEL_DURATION=25
+BATCHER_RPC_PORT=8548
+EOF
+```
+
+### 10.4 Create start script
+
+Create `scripts/start-batcher.sh`:
+
+```bash
+#!/bin/bash
+set -e
+cd "$(dirname "$0")/.."
+source .env
+
+../../op-batcher/bin/op-batcher \
+  --l1-eth-rpc=$L1_RPC_URL \
+  --l2-eth-rpc=$L2_RPC_URL \
+  --rollup-rpc=$ROLLUP_RPC_URL \
+  --poll-interval=$POLL_INTERVAL \
+  --sub-safety-margin=$SUB_SAFETY_MARGIN \
+  --num-confirmations=$NUM_CONFIRMATIONS \
+  --safe-abort-nonce-too-low-count=$SAFE_ABORT_NONCE_TOO_LOW_COUNT \
+  --resubmission-timeout=$RESUBMISSION_TIMEOUT \
+  --rpc.addr=0.0.0.0 \
+  --rpc.port=$BATCHER_RPC_PORT \
+  --rpc.enable-admin \
+  --max-channel-duration=$MAX_CHANNEL_DURATION \
+  --private-key=$BATCHER_PRIVATE_KEY \
+  --data-availability-type=calldata \
+  --log.level=info \
+  --log.format=json
+```
+
+> **Note:** Using `--data-availability-type=calldata` because Anvil doesn't support EIP-4844 blobs. On mainnet/Sepolia, use `blobs` for lower costs.
+
+Make executable: `chmod +x scripts/start-batcher.sh`
+
+### 10.5 Start the batcher
+
+**Terminal 4:**
+
+```bash
+cd rollup/batcher
+./scripts/start-batcher.sh
+```
+
+### Directory Structure
+
+```
+rollup/
+├── deployer/
+├── op-geth/
+├── sequencer/
+└── batcher/
+    ├── state.json      # Copied from deployer
+    ├── .env            # Environment variables
+    └── scripts/
+        └── start-batcher.sh
+```
+
+---
+
 ## Next Steps (Suggested)
 
 1. ~~Spin up sequencer (op-geth + op-node)~~ ✅ Complete
 2. ~~Bridge ETH (deposit & withdrawal)~~ ✅ Complete
-3. **Spin up op-batcher** - Posts L2 data to L1 for data availability
+3. ~~Spin up op-batcher~~ ✅ Complete
 4. **Spin up op-proposer** - Submits L2 state roots to L1 (required to complete withdrawals)
 5. **Spin up op-challenger** - Monitors for invalid state proposals
 
@@ -742,6 +858,7 @@ To avoid full redeployment, use Anvil's state persistence:
 | op-geth (L2 WS) | 9546 | ws://localhost:9546 |
 | op-geth (Auth RPC) | 9551 | http://localhost:9551 |
 | op-node (RPC) | 8547 | http://localhost:8547 |
+| op-batcher (RPC) | 8548 | http://localhost:8548 |
 
 ### Key Paths
 
@@ -759,6 +876,53 @@ To avoid full redeployment, use Anvil's state persistence:
 
 - **L1 (Anvil)**: 31337
 - **L2 (Rollup)**: 42069
+
+---
+
+## Demo: L2 Transactions
+
+A Python script is provided to generate demo transactions on L2 using the Anvil seed 2 accounts.
+
+**Location:** `rollup/scripts/l2_demo.py`
+
+### Usage
+
+```bash
+# Show all L2 account balances
+python3 rollup/scripts/l2_demo.py balances
+
+# Show L2 sync status
+python3 rollup/scripts/l2_demo.py status
+
+# Send ETH between accounts (by index 0-7)
+python3 rollup/scripts/l2_demo.py send <from_index> <to_index> <amount_eth>
+# Example: Send 0.1 ETH from Account 1 to Account 0
+python3 rollup/scripts/l2_demo.py send 1 0 0.1
+
+# Fund multiple accounts (sends 0.1 ETH from Account 1 to Accounts 0,2,3,4,5)
+python3 rollup/scripts/l2_demo.py fund-accounts
+```
+
+### Prerequisites
+
+**L2 accounts start with 0 ETH.** Before using this script, you must first bridge ETH from L1 to L2:
+
+```bash
+# Bridge 1 ETH from L1 to L2 (to Account 1)
+cast send --rpc-url http://localhost:8545 \
+  --private-key 0xbe62250c9db006c67c1595ff1f019bc849e2aa5c092dea0bf00883b39e54e904 \
+  <L1StandardBridgeProxy_ADDRESS> \
+  "depositETH(uint32,bytes)" 100000 "0x" \
+  --value 1ether
+```
+
+After the deposit is processed (wait for L2 to sync with L1), Account 1 will have 1 ETH on L2.
+
+### Notes
+
+- The script uses `cast` (Foundry) under the hood for transaction signing
+- All accounts are derived from Anvil's `--mnemonic-seed-unsafe 2`
+- Get the L1StandardBridgeProxy address from: `cat rollup/batcher/state.json | jq -r '.opChainDeployments[0].L1StandardBridgeProxy'`
 
 ---
 
