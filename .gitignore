@@ -67,5 +67,7 @@ rollup/sequencer/opnode_p2p_priv.txt
 rollup/sequencer/.env
 rollup/batcher/state.json
 rollup/batcher/.env
+rollup/proposer/state.json
+rollup/proposer/.env
 rollup/contracts/out/
 rollup/contracts/cache/

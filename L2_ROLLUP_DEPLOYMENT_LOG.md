@@ -556,28 +556,53 @@ cast balance $ACCOUNT --rpc-url http://localhost:9545 --ether
 >
 > Without this, replica nodes would accept transactions locally that never get sequenced, leading to **transaction loss** and **inconsistent state**.
 
+#### Step 1: Initiate Withdrawal on L2
+
 ```bash
 ACCOUNT="0xE9e05C9f02e10FA833D379CB1c7aC3a3f23B247e"
 PRIVATE_KEY="0xbe62250c9db006c67c1595ff1f019bc849e2aa5c092dea0bf00883b39e54e904"
 L2_BRIDGE="0x4200000000000000000000000000000000000010"
 
-# Withdraw ETH via L2StandardBridge
+# Withdraw 0.1 ETH via L2StandardBridge
 cast send $L2_BRIDGE "withdraw(address,uint256,uint32,bytes)" \
   "0xDeadDeAddeAddEAddeadDEaDDEAdDeaDDeAD0000" \
-  "500000000000000000" \
+  "100000000000000000" \
   100000 \
   "0x" \
-  --value 0.5ether \
+  --value 0.1ether \
   --private-key $PRIVATE_KEY \
   --rpc-url http://localhost:9545
 ```
 
-**Full Withdrawal Flow:**
-1. Initiate withdrawal on L2 (above command)
-2. Wait for proposer to submit L2 state root to L1
-3. Prove withdrawal on L1
-4. Wait for challenge period (7 days on mainnet)
-5. Finalize withdrawal on L1
+**Parameters explained:**
+- `0xDeadDeAddeAddEAddeadDEaDDEAdDeaDDeAD0000` - Native ETH token address (special L2 address)
+- `100000000000000000` - Amount in wei (0.1 ETH)
+- `100000` - L1 gas limit for finalization
+- `0x` - Extra data (empty)
+- `--value 0.1ether` - Must match the withdrawal amount
+
+**Successful example output:**
+```
+blockNumber          6724
+status               1 (success)
+transactionHash      0x25ce27ca7d7d3ecc718e529aebbb2d00933653e5ea4e18d3ed2cb4f581ebcb85
+```
+
+#### Full Withdrawal Flow
+
+| Step | Description | Time |
+|------|-------------|------|
+| 1 | Initiate on L2 | Instant |
+| 2 | Wait for batcher to submit batch | ~minutes |
+| 3 | Wait for proposer to submit state root | ~2 min (proposal interval) |
+| 4 | Prove withdrawal on L1 | Requires SDK |
+| 5 | Wait for challenge period | 7 days (mainnet) |
+| 6 | Finalize on L1 | Requires SDK |
+
+> **Note:** Steps 4-6 require the Optimism SDK or specialized tooling to generate proofs and call the OptimismPortal contract. For local testing, you can verify the withdrawal was initiated by checking:
+> - L2 balance decreased
+> - L2ToL1MessagePasser logs emitted (address `0x4200000000000000000000000000000000000016`)
+> - Proposer submitting state roots to DisputeGameFactory
 
 ---
 
@@ -837,12 +862,148 @@ rollup/
 
 ---
 
+## 11. Spin up op-proposer
+
+The proposer submits L2 state roots to L1 via the DisputeGameFactory contract. This is required for L2→L1 withdrawals to be proven and finalized.
+
+### 11.1 Build op-proposer
+
+```bash
+cd optimism/op-proposer
+mkdir -p bin
+go build -o bin/op-proposer ./cmd
+```
+
+### 11.2 Create proposer directory
+
+```bash
+cd rollup
+mkdir -p proposer/scripts
+cd proposer
+
+# Copy state.json from deployer
+cp ../deployer/.deployer/state.json .
+
+# Extract DisputeGameFactory address
+cat state.json | jq -r '.opChainDeployments[0].DisputeGameFactoryProxy'
+```
+
+### 11.3 Set up environment variables
+
+Create `.env`:
+
+```bash
+cat > .env << 'EOF'
+# L1 Configuration (Anvil)
+L1_RPC_URL=http://localhost:8545
+
+# L2 Configuration
+L2_RPC_URL=http://localhost:9545
+ROLLUP_RPC_URL=http://localhost:8547
+
+# DisputeGameFactory address from deployment
+GAME_FACTORY_ADDRESS=<ADDRESS_FROM_STEP_11.2>
+
+# Proposer private key (Anvil seed 2, Account 5)
+PRIVATE_KEY=0x309bc84a97ca76f0c15bc3a6c98d46d8fb2381c8bd63ba6cc7b0d25ff4a13332
+
+# Proposer configuration
+PROPOSAL_INTERVAL=120s
+GAME_TYPE=1
+POLL_INTERVAL=6s
+PROPOSER_RPC_PORT=8560
+EOF
+```
+
+### 11.4 Create start script
+
+Create `scripts/start-proposer.sh`:
+
+```bash
+#!/bin/bash
+set -e
+cd "$(dirname "$0")/.."
+source .env
+
+../../op-proposer/bin/op-proposer \
+  --poll-interval=$POLL_INTERVAL \
+  --rpc.port=$PROPOSER_RPC_PORT \
+  --rpc.enable-admin \
+  --rollup-rpc=$ROLLUP_RPC_URL \
+  --l1-eth-rpc=$L1_RPC_URL \
+  --private-key=$PRIVATE_KEY \
+  --game-factory-address=$GAME_FACTORY_ADDRESS \
+  --game-type=$GAME_TYPE \
+  --proposal-interval=$PROPOSAL_INTERVAL \
+  --num-confirmations=1 \
+  --resubmission-timeout=30s \
+  --wait-node-sync=false \
+  --allow-non-finalized=true \
+  --log.level=info \
+  --log.format=json
+```
+
+> **Note:** Using `--allow-non-finalized=true` and `--wait-node-sync=false` for Anvil since it doesn't have finality like a real L1.
+
+Make executable: `chmod +x scripts/start-proposer.sh`
+
+### 11.5 Start the proposer
+
+**Terminal 6:**
+
+```bash
+cd rollup/proposer
+./scripts/start-proposer.sh
+```
+
+### Directory Structure
+
+```
+rollup/
+├── deployer/
+├── op-geth/
+├── sequencer/
+├── batcher/
+└── proposer/
+    ├── state.json      # Copied from deployer
+    ├── .env            # Environment variables
+    └── scripts/
+        └── start-proposer.sh
+```
+
+### 11.6 Monitor Proposer Activity
+
+A Python script is provided to monitor proposer transactions on L1.
+
+**Location:** `rollup/scripts/proposer_status.py`
+
+**Usage:**
+
+```bash
+# One-time status check
+python3 rollup/scripts/proposer_status.py
+
+# Continuous monitoring (every 30 seconds)
+python3 rollup/scripts/proposer_status.py watch
+
+# Custom interval (every 10 seconds)
+python3 rollup/scripts/proposer_status.py watch 10
+```
+
+**Output includes:**
+- Proposer account balance and nonce
+- L2 sync status (unsafe, safe, finalized blocks)
+- Recent proposer transactions to DisputeGameFactory
+- L1/L2 block numbers
+
+---
+
 ## Next Steps (Suggested)
 
 1. ~~Spin up sequencer (op-geth + op-node)~~ ✅ Complete
 2. ~~Bridge ETH (deposit & withdrawal)~~ ✅ Complete
 3. ~~Spin up op-batcher~~ ✅ Complete
-4. **Spin up op-proposer** - Submits L2 state roots to L1 (required to complete withdrawals)
+4. ~~Spin up op-proposer~~ ✅ Complete
 5. **Spin up op-challenger** - Monitors for invalid state proposals
 
 ---
@@ -859,6 +1020,7 @@ rollup/
 | op-geth (Auth RPC) | 9551 | http://localhost:9551 |
 | op-node (RPC) | 8547 | http://localhost:8547 |
 | op-batcher (RPC) | 8548 | http://localhost:8548 |
+| op-proposer (RPC) | 8560 | http://localhost:8560 |
 
 ### Key Paths
 
