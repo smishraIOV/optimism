@@ -69,5 +69,8 @@ rollup/batcher/state.json
 rollup/batcher/.env
 rollup/proposer/state.json
 rollup/proposer/.env
+rollup/challenger/state.json
+rollup/challenger/.env
+rollup/challenger/data/
 rollup/contracts/out/
 rollup/contracts/cache/

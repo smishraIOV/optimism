@@ -8,15 +8,16 @@ Following the tutorial: https://docs.optimism.io/chain-operators/tutorials/creat
 |------|--------|-------|
 | 1. Install op-deployer | ✅ Complete | Built from source |
 | 2. Create directory structure | ✅ Complete | `rollup/deployer`, `rollup/sequencer` |
-| 3. Start Anvil (L1) | ✅ Complete | `--mnemonic-seed-unsafe 2 --hardfork cancun` |
+| 3. Start Anvil (L1) | ✅ Complete | `--mnemonic-seed-unsafe 2 --hardfork cancun --block-time 15` |
 | 4. Initialize and configure intent | ✅ Complete | Custom intent type for local chain |
 | 5. Deploy L1 contracts | ✅ Complete | ~82M gas, 37 transactions |
 | 6. Generate and modify chain config | ✅ Complete | Disable future hardforks for Anvil |
 | 7. Build op-node and op-geth | ✅ Complete | op-geth v1.101511.1 |
 | 8. Configure and initialize sequencer | ✅ Complete | JWT, l1-chain-config, scripts |
-| 9. Start sequencer | ✅ Running | op-geth + op-node producing blocks |
-| 10. Spin up batcher | ✅ Complete | Posts L2 data to L1 |
-| 11. Spin up proposer | ⏳ Pending | |
+| 9. Start sequencer | ✅ Complete | op-geth + op-node producing blocks |
+| 10. Spin up batcher | ✅ Complete | Posts L2 data to L1 via calldata |
+| 11. Spin up proposer | ✅ Complete | Submits state roots to DisputeGameFactory |
+| 12. Spin up challenger | ✅ Complete | Monitors dispute games (limited on Anvil) |
 
 ---
 
@@ -998,13 +999,248 @@ python3 rollup/scripts/proposer_status.py watch 10
 
 ---
 
-## Next Steps (Suggested)
+## 12. Spin up op-challenger
 
-1. ~~Spin up sequencer (op-geth + op-node)~~ ✅ Complete
-2. ~~Bridge ETH (deposit & withdrawal)~~ ✅ Complete
-3. ~~Spin up op-batcher~~ ✅ Complete
-4. ~~Spin up op-proposer~~ ✅ Complete
-5. **Spin up op-challenger** - Monitors for invalid state proposals
+The challenger monitors dispute games and challenges invalid claims.
+
+### 12.1 Generate Prestate (Requires Docker)
+
+```bash
+cd optimism
+
+# Copy chain configs for prestate generation
+mkdir -p op-program/chainconfig/configs
+cp rollup/sequencer/rollup.json op-program/chainconfig/configs/42069-rollup.json
+cp rollup/sequencer/genesis.json op-program/chainconfig/configs/42069-genesis-l2.json
+
+# Create L1 genesis config for Anvil
+cat > op-program/chainconfig/configs/31337-genesis-l1.json << 'EOF'
+{
+  "config": {
+    "chainId": 31337,
+    "homesteadBlock": 0,
+    "eip150Block": 0,
+    "eip155Block": 0,
+    "eip158Block": 0,
+    "byzantiumBlock": 0,
+    "constantinopleBlock": 0,
+    "petersburgBlock": 0,
+    "istanbulBlock": 0,
+    "berlinBlock": 0,
+    "londonBlock": 0,
+    "shanghaiTime": 0,
+    "cancunTime": 0,
+    "terminalTotalDifficulty": 0,
+    "blobSchedule": {
+      "cancun": { "target": 3, "max": 6, "baseFeeUpdateFraction": 3338477 }
+    }
+  },
+  "alloc": {},
+  "difficulty": "0x0",
+  "gasLimit": "0x1c9c380"
+}
+EOF
+
+# Generate prestate (requires Docker)
+make reproducible-prestate
+```
+
+Save the **Cannon64 Absolute prestate hash** from the output (e.g., `0x03d2a051e4d2b2e9bfa365ec6a562ead2ba245108c47d6b52ae79bebd97828ec`).
+
+### 12.2 Build op-challenger and cannon
+
+```bash
+cd optimism/op-challenger && just
+cd ../.. && make cannon
+```
+
+### 12.3 Create challenger directory
+
+```bash
+cd rollup
+mkdir -p challenger/scripts
+cd challenger
+
+# Copy state for contract addresses
+cp ../deployer/.deployer/state.json .
+
+# Get DisputeGameFactory address
+cat state.json | jq -r '.opChainDeployments[0].DisputeGameFactoryProxy'
+```
+
+### 12.4 Environment variables
+
+```bash
+cat > .env << 'EOF'
+L1_RPC_URL=http://localhost:8545
+L2_RPC_URL=http://localhost:9545
+ROLLUP_RPC_URL=http://localhost:8547
+GAME_FACTORY_ADDRESS=0xc2f53f7e5ae6180682e9353b34ec544053784a91
+
+# Challenger private key (Anvil seed 2, Account 6)
+PRIVATE_KEY=0x4e84476ad472f4a1ccf16e2f96a70df8f8c4a9bceb06e0a4c1bdca6fddce9d1c
+
+# Paths (relative to rollup/challenger/)
+DATADIR=./data
+CANNON_BIN=../../cannon/bin/cannon
+CANNON_SERVER=../../op-program/bin/op-program
+CANNON_PRESTATE=../../op-program/bin/prestate-proof-mt64.json
+CANNON_ROLLUP_CONFIG=../sequencer/rollup.json
+CANNON_L2_GENESIS=../sequencer/genesis.json
+EOF
+```
+
+### 12.5 Start script
+
+```bash
+cat > scripts/start-challenger.sh << 'EOF'
+#!/bin/bash
+source .env
+mkdir -p $DATADIR
+
+../../op-challenger/bin/op-challenger \
+  --trace-type permissioned,cannon \
+  --l1-eth-rpc=$L1_RPC_URL \
+  --l1-beacon=$L1_RPC_URL \
+  --l2-eth-rpc=$L2_RPC_URL \
+  --rollup-rpc=$ROLLUP_RPC_URL \
+  --game-factory-address=$GAME_FACTORY_ADDRESS \
+  --datadir=$DATADIR \
+  --cannon-bin=$CANNON_BIN \
+  --cannon-rollup-config=$CANNON_ROLLUP_CONFIG \
+  --cannon-l2-genesis=$CANNON_L2_GENESIS \
+  --cannon-server=$CANNON_SERVER \
+  --cannon-prestate=$CANNON_PRESTATE \
+  --private-key=$PRIVATE_KEY \
+  --log.level=info
+EOF
+chmod +x scripts/start-challenger.sh
+```
+
+### 12.6 Start the challenger
+
+**Terminal 7:**
+```bash
+cd rollup/challenger
+./scripts/start-challenger.sh
+```
+
+### Challenger Limitations on Anvil
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Startup | ✅ Works | Connects to L1/L2 |
+| Game monitoring | ✅ Works | Finds dispute games |
+| Move calculation | ⚠️ Limited | Needs archive node with SafeDB |
+| Full dispute participation | ❌ | Requires real beacon endpoint |
+
+> **Note:** For local Anvil testing, the challenger can monitor games but cannot fully participate in disputes due to missing beacon endpoint and SafeDB. This is expected for development setups.
+
+---
+
+## Tutorial Complete! 🎉
+
+All components of the Optimism L2 rollup are now running:
+
+1. ✅ **op-deployer** - L1 contracts deployed
+2. ✅ **Sequencer** (op-geth + op-node) - Processing transactions
+3. ✅ **op-batcher** - Publishing data to L1
+4. ✅ **op-proposer** - Submitting state roots
+5. ✅ **op-challenger** - Monitoring disputes
+
+---
+
+## Process Management
+
+A script is provided to check and manage all rollup processes.
+
+**Location:** `rollup/scripts/check_processes.py`
+
+### Check Status (safe - doesn't kill anything)
+
+```bash
+python3 rollup/scripts/check_processes.py
+```
+
+Output shows which components are running and their PIDs:
+```
+L1 Chain (Anvil)          ✅ Running
+  └─ PID 12345: anvil --hardfork cancun --block-time 15...
+L2 Execution (op-geth)    ✅ Running
+  └─ PID 12346: geth --datadir op-geth-data...
+...
+```
+
+### Kill All Processes
+
+```bash
+# Graceful shutdown (SIGTERM)
+python3 rollup/scripts/check_processes.py kill
+
+# Force kill (SIGKILL) - use if graceful fails
+python3 rollup/scripts/check_processes.py kill -f
+```
+
+### Manual Process Check
+
+```bash
+# Check individual processes
+pgrep -f anvil
+pgrep -f "geth.*op-geth-data"
+pgrep -f op-node
+pgrep -f op-batcher
+pgrep -f op-proposer
+pgrep -f op-challenger
+```
+
+---
+
+## Cleanup
+
+A cleanup script is provided to stop processes and remove generated data.
+
+**Location:** `rollup/scripts/cleanup.py`
+
+### Dry Run (see what would be cleaned)
+
+```bash
+python3 rollup/scripts/cleanup.py
+```
+
+### Standard Cleanup (stop processes + remove runtime data)
+
+```bash
+python3 rollup/scripts/cleanup.py --execute
+```
+
+This removes:
+- `sequencer/op-geth-data/` - L2 chain data
+- `sequencer/opnode_*` - op-node databases
+- `sequencer/jwt.txt` - JWT secret
+- `*/state.json` copies in batcher/proposer/challenger
+- `challenger/data/` - Challenger cache
+
+### Full Cleanup (also remove deployment state)
+
+```bash
+python3 rollup/scripts/cleanup.py --execute --full
+```
+
+Additionally removes:
+- `deployer/.deployer/state.json` - Deployment state
+- `sequencer/genesis.json` - L2 genesis
+- `sequencer/rollup.json` - Rollup config
+
+> ⚠️ **After full cleanup**, you must redeploy contracts with `op-deployer apply` before starting the rollup again.
+
+### What's Preserved
+
+Even after cleanup, these are kept:
+- `deployer/.deployer/intent.toml` - Deployment configuration
+- `*/scripts/*.sh` - Start scripts
+- `scripts/*.py` - Utility scripts
+- `sequencer/l1-chain-config.json` - L1 config for op-node
+- `sequencer/.env` - Environment variables (but may need updating)
 
 ---
 
