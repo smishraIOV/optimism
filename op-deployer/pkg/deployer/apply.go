@@ -32,14 +32,15 @@ import (
 )
 
 type ApplyConfig struct {
-	L1RPCUrl         string
-	Workdir          string
-	PrivateKey       string
-	DeploymentTarget DeploymentTarget
-	Logger           log.Logger
-	CacheDir         string
-	privateKeyECDSA  *ecdsa.PrivateKey
-	PreStateBuilder  pipeline.PreStateBuilder
+	L1RPCUrl          string
+	Workdir           string
+	PrivateKey        string
+	DeploymentTarget  DeploymentTarget
+	Logger            log.Logger
+	CacheDir          string
+	privateKeyECDSA   *ecdsa.PrivateKey
+	PreStateBuilder   pipeline.PreStateBuilder
+	PhasedDeployment  bool
 }
 
 func (a *ApplyConfig) Check() error {
@@ -103,13 +104,14 @@ func ApplyCLI() func(cliCtx *cli.Context) error {
 		ctx := ctxinterrupt.WithCancelOnInterrupt(cliCtx.Context)
 
 		if err := Apply(ctx, ApplyConfig{
-			L1RPCUrl:         l1RPCUrl,
-			Workdir:          workdir,
-			PrivateKey:       privateKey,
-			DeploymentTarget: depTarget,
-			Logger:           l,
-			CacheDir:         cacheDir,
-			PreStateBuilder:  preStateBuilder,
+			L1RPCUrl:          l1RPCUrl,
+			Workdir:           workdir,
+			PrivateKey:        privateKey,
+			DeploymentTarget:  depTarget,
+			Logger:            l,
+			CacheDir:          cacheDir,
+			PreStateBuilder:   preStateBuilder,
+			PhasedDeployment:  cliCtx.Bool(PhasedDeploymentFlag.Name),
 		}); err != nil {
 			return err
 		}
@@ -168,6 +170,7 @@ func Apply(ctx context.Context, cfg ApplyConfig) error {
 		StateWriter:        pipeline.WorkdirStateWriter(cfg.Workdir),
 		CacheDir:           cfg.CacheDir,
 		PreStateBuilder:    cfg.PreStateBuilder,
+		PhasedDeployment:   cfg.PhasedDeployment,
 	}); err != nil {
 		return err
 	}
@@ -190,6 +193,7 @@ type ApplyPipelineOpts struct {
 	StateWriter        pipeline.StateWriter
 	CacheDir           string
 	PreStateBuilder    pipeline.PreStateBuilder
+	PhasedDeployment   bool
 }
 
 func ApplyPipeline(
@@ -334,13 +338,14 @@ func ApplyPipeline(
 	}
 
 	pEnv := &pipeline.Env{
-		StateWriter:  opts.StateWriter,
-		L1ScriptHost: l1Host,
-		L1Client:     l1Client,
-		Logger:       opts.Logger,
-		Broadcaster:  bcaster,
-		Deployer:     deployer,
-		Scripts:      opcmScripts,
+		StateWriter:      opts.StateWriter,
+		L1ScriptHost:     l1Host,
+		L1Client:         l1Client,
+		Logger:           opts.Logger,
+		Broadcaster:      bcaster,
+		Deployer:         deployer,
+		Scripts:          opcmScripts,
+		PhasedDeployment: opts.PhasedDeployment,
 	}
 
 	pline := []pipelineStage{

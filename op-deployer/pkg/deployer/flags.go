@@ -134,6 +134,12 @@ var (
 		EnvVars: PrefixEnvVar("VERIFY"),
 		Value:   false,
 	}
+	PhasedDeploymentFlag = &cli.BoolFlag{
+		Name:    "phased-deployment",
+		Usage:   "use phased deployment for gas-limited L1s (splits deploy into 4 transactions)",
+		EnvVars: PrefixEnvVar("PHASED_DEPLOYMENT"),
+		Value:   false,
+	}
 )
 
 var GlobalFlags = append([]cli.Flag{CacheDirFlag}, oplog.CLIFlags(EnvVarPrefix)...)
@@ -155,6 +161,7 @@ var ApplyFlags = []cli.Flag{
 	VerifierAPIKeyFlag,
 	VerifierFlag,
 	VerifierUrlFlag,
+	PhasedDeploymentFlag,
 }
 
 var UpgradeFlags = []cli.Flag{

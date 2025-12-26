@@ -27,16 +27,24 @@ func DeployOPChain(env *Env, intent *state.Intent, st *state.State, chainID comm
 	}
 
 	var dco opcm.DeployOPChainOutput
-	lgr.Info("deploying OP chain using local allocs", "id", chainID.Hex())
 
 	dci, err := makeDCI(intent, thisIntent, chainID, st)
 	if err != nil {
 		return fmt.Errorf("error making deploy OP chain input: %w", err)
 	}
 
-	dco, err = env.Scripts.DeployOPChain.Run(dci)
-	if err != nil {
-		return fmt.Errorf("error deploying OP chain: %w", err)
+	if env.PhasedDeployment {
+		lgr.Info("deploying OP chain using phased deployment (4 transactions)", "id", chainID.Hex())
+		dco, err = deployOPChainPhased(env, dci, st)
+		if err != nil {
+			return fmt.Errorf("error in phased deployment: %w", err)
+		}
+	} else {
+		lgr.Info("deploying OP chain using single transaction", "id", chainID.Hex())
+		dco, err = env.Scripts.DeployOPChain.Run(dci)
+		if err != nil {
+			return fmt.Errorf("error deploying OP chain: %w", err)
+		}
 	}
 
 	readInput := opcm.ReadImplementationAddressesInput{
@@ -190,4 +198,70 @@ func isDevFeatureEnabled(bitmap, flag common.Hash) bool {
 	featuresIsNonZero := f.Cmp(big.NewInt(0)) != 0
 	bitmapContainsFeatures := new(big.Int).And(b, f).Cmp(f) == 0
 	return featuresIsNonZero && bitmapContainsFeatures
+}
+
+// deployOPChainPhased deploys an OP chain using 4 separate transactions
+// to stay under gas limits on constrained L1s.
+func deployOPChainPhased(env *Env, dci opcm.DeployOPChainInput, st *state.State) (opcm.DeployOPChainOutput, error) {
+	lgr := env.Logger.New("stage", "deploy-opchain-phased")
+
+	// Get the OPCM deployer address from implementations
+	opcmDeployerAddr := st.ImplementationsDeployment.OpcmDeployerImpl
+
+	// Convert to phased input
+	phasedInput := opcm.FromDeployInput(dci)
+
+	// Phase 1: Deploy singletons
+	lgr.Info("phase 1: deploying singletons (AddressManager, ProxyAdmin)")
+	phase1Input := opcm.Phase1Input{
+		DeployInput:  phasedInput,
+		OpcmDeployer: opcmDeployerAddr,
+	}
+	phase1Output, err := env.Scripts.DeployPhase1.Run(phase1Input)
+	if err != nil {
+		return opcm.DeployOPChainOutput{}, fmt.Errorf("phase 1 failed: %w", err)
+	}
+	lgr.Info("phase 1 complete", "addressManager", phase1Output.AddressManager.Hex(), "proxyAdmin", phase1Output.OpChainProxyAdmin.Hex())
+
+	// Phase 2: Deploy ERC-1967 proxies
+	lgr.Info("phase 2: deploying ERC-1967 proxies")
+	phase2Input := opcm.Phase2Input{
+		DeployInput:  phasedInput,
+		OpcmDeployer: opcmDeployerAddr,
+		Phase1:       phase1Output,
+	}
+	phase2Output, err := env.Scripts.DeployPhase2.Run(phase2Input)
+	if err != nil {
+		return opcm.DeployOPChainOutput{}, fmt.Errorf("phase 2 failed: %w", err)
+	}
+	lgr.Info("phase 2 complete", "systemConfig", phase2Output.SystemConfigProxy.Hex())
+
+	// Phase 3: Deploy legacy proxies
+	lgr.Info("phase 3: deploying legacy proxies")
+	phase3Input := opcm.Phase3Input{
+		DeployInput:  phasedInput,
+		OpcmDeployer: opcmDeployerAddr,
+		Phase2:       phase2Output,
+	}
+	phase3Output, err := env.Scripts.DeployPhase3.Run(phase3Input)
+	if err != nil {
+		return opcm.DeployOPChainOutput{}, fmt.Errorf("phase 3 failed: %w", err)
+	}
+	lgr.Info("phase 3 complete", "l1StandardBridge", phase3Output.L1StandardBridgeProxy.Hex())
+
+	// Phase 4: Initialize and finalize
+	lgr.Info("phase 4: initializing contracts and finalizing")
+	phase4Input := opcm.Phase4Input{
+		DeployInput:      phasedInput,
+		OpcmDeployer:     opcmDeployerAddr,
+		Phase3:           phase3Output,
+		SuperchainConfig: st.SuperchainDeployment.SuperchainConfigProxy,
+	}
+	finalOutput, err := env.Scripts.DeployPhase4.Run(phase4Input)
+	if err != nil {
+		return opcm.DeployOPChainOutput{}, fmt.Errorf("phase 4 failed: %w", err)
+	}
+	lgr.Info("phase 4 complete - deployment finished")
+
+	return finalOutput, nil
 }

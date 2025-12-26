@@ -23,13 +23,14 @@ import (
 )
 
 type Env struct {
-	StateWriter  StateWriter
-	L1ScriptHost *script.Host
-	L1Client     *ethclient.Client
-	Broadcaster  broadcaster.Broadcaster
-	Deployer     common.Address
-	Logger       log.Logger
-	Scripts      *opcm.Scripts
+	StateWriter      StateWriter
+	L1ScriptHost     *script.Host
+	L1Client         *ethclient.Client
+	Broadcaster      broadcaster.Broadcaster
+	Deployer         common.Address
+	Logger           log.Logger
+	Scripts          *opcm.Scripts
+	PhasedDeployment bool
 }
 
 type StateWriter interface {

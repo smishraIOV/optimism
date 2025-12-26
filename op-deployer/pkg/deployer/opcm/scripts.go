@@ -16,6 +16,11 @@ type Scripts struct {
 	DeployMIPS            DeployMIPSScript
 	DeploySuperchain      DeploySuperchainScript
 	DeployOPChain         DeployOPChainScript
+	// Phased deployment scripts for gas-limited L1s
+	DeployPhase1 DeployPhase1Script
+	DeployPhase2 DeployPhase2Script
+	DeployPhase3 DeployPhase3Script
+	DeployPhase4 DeployPhase4Script
 }
 
 // NewScripts collects all the deployment scripts, raising exceptions if any of them
@@ -61,6 +66,27 @@ func NewScripts(host *script.Host) (*Scripts, error) {
 		return nil, fmt.Errorf("failed to load DeployOPChain script: %w", err)
 	}
 
+	// Load phased deployment scripts
+	deployPhase1, err := NewDeployPhase1Script(host)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load DeployPhase1 script: %w", err)
+	}
+
+	deployPhase2, err := NewDeployPhase2Script(host)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load DeployPhase2 script: %w", err)
+	}
+
+	deployPhase3, err := NewDeployPhase3Script(host)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load DeployPhase3 script: %w", err)
+	}
+
+	deployPhase4, err := NewDeployPhase4Script(host)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load DeployPhase4 script: %w", err)
+	}
+
 	return &Scripts{
 		DeployAlphabetVM:      deployAlphabetVM,
 		DeployAltDA:           deployAltDA,
@@ -70,5 +96,9 @@ func NewScripts(host *script.Host) (*Scripts, error) {
 		DeployImplementations: deployImplementations,
 		DeploySuperchain:      deploySuperchain,
 		DeployOPChain:         deployOPChain,
+		DeployPhase1:          deployPhase1,
+		DeployPhase2:          deployPhase2,
+		DeployPhase3:          deployPhase3,
+		DeployPhase4:          deployPhase4,
 	}, nil
 }

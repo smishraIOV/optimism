@@ -70,10 +70,76 @@ interface IOPContractsManagerGameTypeAdder {
 interface IOPContractsManagerDeployer {
     event Deployed(uint256 indexed l2ChainId, address indexed deployer, bytes deployOutput);
 
+    /// @notice Phase 1 output: Singletons
+    struct DeployPhase1Output {
+        IAddressManager addressManager;
+        IProxyAdmin opChainProxyAdmin;
+    }
+
+    /// @notice Phase 2 output: ERC-1967 Proxies
+    struct DeployPhase2Output {
+        IAddressManager addressManager;
+        IProxyAdmin opChainProxyAdmin;
+        IL1ERC721Bridge l1ERC721BridgeProxy;
+        IOptimismPortal2 optimismPortalProxy;
+        IETHLockbox ethLockboxProxy;
+        ISystemConfig systemConfigProxy;
+        IOptimismMintableERC20Factory optimismMintableERC20FactoryProxy;
+        IDisputeGameFactory disputeGameFactoryProxy;
+        IAnchorStateRegistry anchorStateRegistryProxy;
+    }
+
+    /// @notice Phase 3 output: Legacy Proxies
+    struct DeployPhase3Output {
+        IAddressManager addressManager;
+        IProxyAdmin opChainProxyAdmin;
+        IL1ERC721Bridge l1ERC721BridgeProxy;
+        IOptimismPortal2 optimismPortalProxy;
+        IETHLockbox ethLockboxProxy;
+        ISystemConfig systemConfigProxy;
+        IOptimismMintableERC20Factory optimismMintableERC20FactoryProxy;
+        IDisputeGameFactory disputeGameFactoryProxy;
+        IAnchorStateRegistry anchorStateRegistryProxy;
+        IL1StandardBridge l1StandardBridgeProxy;
+        IL1CrossDomainMessenger l1CrossDomainMessengerProxy;
+        IDelayedWETH delayedWETHPermissionedGameProxy;
+    }
+
     function __constructor__(IOPContractsManagerContractsContainer _contractsContainer) external;
 
     function deploy(
         IOPContractsManager.DeployInput memory _input,
+        ISuperchainConfig _superchainConfig,
+        address _deployer
+    )
+        external
+        returns (IOPContractsManager.DeployOutput memory);
+
+    /// @notice Phase 1: Deploy singletons (AddressManager, ProxyAdmin)
+    function deployPhase1(IOPContractsManager.DeployInput calldata _input)
+        external
+        returns (DeployPhase1Output memory);
+
+    /// @notice Phase 2: Deploy ERC-1967 proxies
+    function deployPhase2(
+        IOPContractsManager.DeployInput calldata _input,
+        DeployPhase1Output calldata _phase1
+    )
+        external
+        returns (DeployPhase2Output memory);
+
+    /// @notice Phase 3: Deploy legacy proxies
+    function deployPhase3(
+        IOPContractsManager.DeployInput calldata _input,
+        DeployPhase2Output calldata _phase2
+    )
+        external
+        returns (DeployPhase3Output memory);
+
+    /// @notice Phase 4: Initialize all proxies and finalize
+    function deployPhase4(
+        IOPContractsManager.DeployInput calldata _input,
+        DeployPhase3Output calldata _phase3,
         ISuperchainConfig _superchainConfig,
         address _deployer
     )

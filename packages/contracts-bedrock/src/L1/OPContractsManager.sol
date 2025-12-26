@@ -1111,6 +1111,294 @@ contract OPContractsManagerDeployer is OPContractsManagerBase {
 
     constructor(OPContractsManagerContractsContainer _contractsContainer) OPContractsManagerBase(_contractsContainer) { }
 
+    // ============================================================
+    // ==================== PHASED DEPLOYMENT =====================
+    // ============================================================
+
+    /// @notice Phase 1: Deploy singletons (AddressManager, ProxyAdmin)
+    /// @param _input The deploy input parameters.
+    /// @return output The phase 1 output containing singleton addresses.
+    function deployPhase1(
+        OPContractsManager.DeployInput calldata _input
+    )
+        external
+        virtual
+        returns (OPContractsManager.DeployPhase1Output memory output)
+    {
+        assertValidInputs(_input);
+        OPContractsManager.Blueprints memory blueprint = getBlueprints();
+
+        // Deploy AddressManager
+        output.addressManager = IAddressManager(
+            Blueprint.deployFrom(
+                blueprint.addressManager,
+                computeSalt(_input.l2ChainId, _input.saltMixer, "AddressManager"),
+                abi.encode()
+            )
+        );
+
+        // Deploy ProxyAdmin (temporarily owned by this contract)
+        output.opChainProxyAdmin = IProxyAdmin(
+            Blueprint.deployFrom(
+                blueprint.proxyAdmin,
+                computeSalt(_input.l2ChainId, _input.saltMixer, "ProxyAdmin"),
+                abi.encode(address(this))
+            )
+        );
+
+        // Set AddressManager on ProxyAdmin
+        output.opChainProxyAdmin.setAddressManager(output.addressManager);
+
+        // Transfer AddressManager ownership to ProxyAdmin
+        transferOwnership(address(output.addressManager), address(output.opChainProxyAdmin));
+    }
+
+    /// @notice Phase 2: Deploy ERC-1967 proxies
+    /// @param _input The deploy input parameters.
+    /// @param _phase1 The output from phase 1.
+    /// @return output The phase 2 output containing all proxy addresses.
+    function deployPhase2(
+        OPContractsManager.DeployInput calldata _input,
+        OPContractsManager.DeployPhase1Output calldata _phase1
+    )
+        external
+        virtual
+        returns (OPContractsManager.DeployPhase2Output memory output)
+    {
+        // Copy phase 1 outputs
+        output.addressManager = _phase1.addressManager;
+        output.opChainProxyAdmin = _phase1.opChainProxyAdmin;
+
+        // Deploy ERC-1967 proxies
+        output.l1ERC721BridgeProxy = IL1ERC721Bridge(
+            deployProxy(_input.l2ChainId, output.opChainProxyAdmin, _input.saltMixer, "L1ERC721Bridge")
+        );
+        output.optimismPortalProxy = IOptimismPortal(
+            payable(deployProxy(_input.l2ChainId, output.opChainProxyAdmin, _input.saltMixer, "OptimismPortal"))
+        );
+        output.ethLockboxProxy = IETHLockbox(
+            deployProxy(_input.l2ChainId, output.opChainProxyAdmin, _input.saltMixer, "ETHLockbox")
+        );
+        output.systemConfigProxy = ISystemConfig(
+            deployProxy(_input.l2ChainId, output.opChainProxyAdmin, _input.saltMixer, "SystemConfig")
+        );
+        output.optimismMintableERC20FactoryProxy = IOptimismMintableERC20Factory(
+            deployProxy(_input.l2ChainId, output.opChainProxyAdmin, _input.saltMixer, "OptimismMintableERC20Factory")
+        );
+        output.disputeGameFactoryProxy = IDisputeGameFactory(
+            deployProxy(_input.l2ChainId, output.opChainProxyAdmin, _input.saltMixer, "DisputeGameFactory")
+        );
+        output.anchorStateRegistryProxy = IAnchorStateRegistry(
+            deployProxy(_input.l2ChainId, output.opChainProxyAdmin, _input.saltMixer, "AnchorStateRegistry")
+        );
+    }
+
+    /// @notice Phase 3: Deploy legacy proxies
+    /// @param _input The deploy input parameters.
+    /// @param _phase2 The output from phase 2.
+    /// @return output The phase 3 output containing all deployed addresses.
+    function deployPhase3(
+        OPContractsManager.DeployInput calldata _input,
+        OPContractsManager.DeployPhase2Output calldata _phase2
+    )
+        external
+        virtual
+        returns (OPContractsManager.DeployPhase3Output memory output)
+    {
+        OPContractsManager.Blueprints memory blueprint = getBlueprints();
+
+        // Copy phase 2 outputs
+        output.addressManager = _phase2.addressManager;
+        output.opChainProxyAdmin = _phase2.opChainProxyAdmin;
+        output.l1ERC721BridgeProxy = _phase2.l1ERC721BridgeProxy;
+        output.optimismPortalProxy = _phase2.optimismPortalProxy;
+        output.ethLockboxProxy = _phase2.ethLockboxProxy;
+        output.systemConfigProxy = _phase2.systemConfigProxy;
+        output.optimismMintableERC20FactoryProxy = _phase2.optimismMintableERC20FactoryProxy;
+        output.disputeGameFactoryProxy = _phase2.disputeGameFactoryProxy;
+        output.anchorStateRegistryProxy = _phase2.anchorStateRegistryProxy;
+
+        // Deploy legacy L1StandardBridge proxy
+        output.l1StandardBridgeProxy = IL1StandardBridge(
+            payable(
+                Blueprint.deployFrom(
+                    blueprint.l1ChugSplashProxy,
+                    computeSalt(_input.l2ChainId, _input.saltMixer, "L1StandardBridge"),
+                    abi.encode(output.opChainProxyAdmin)
+                )
+            )
+        );
+        output.opChainProxyAdmin.setProxyType(address(output.l1StandardBridgeProxy), IProxyAdmin.ProxyType.CHUGSPLASH);
+
+        // Deploy legacy L1CrossDomainMessenger proxy
+        string memory contractName = "OVM_L1CrossDomainMessenger";
+        output.l1CrossDomainMessengerProxy = IL1CrossDomainMessenger(
+            Blueprint.deployFrom(
+                blueprint.resolvedDelegateProxy,
+                computeSalt(_input.l2ChainId, _input.saltMixer, "L1CrossDomainMessenger"),
+                abi.encode(output.addressManager, contractName)
+            )
+        );
+        output.opChainProxyAdmin.setProxyType(
+            address(output.l1CrossDomainMessengerProxy), IProxyAdmin.ProxyType.RESOLVED
+        );
+        output.opChainProxyAdmin.setImplementationName(address(output.l1CrossDomainMessengerProxy), contractName);
+
+        // Deploy DelayedWETH proxy
+        output.delayedWETHPermissionedGameProxy = IDelayedWETH(
+            payable(
+                deployProxy(_input.l2ChainId, output.opChainProxyAdmin, _input.saltMixer, "DelayedWETHPermissionedGame")
+            )
+        );
+    }
+
+    /// @notice Convert Phase3Output to DeployOutput for use with initialization functions.
+    /// @dev This allows the initialization code to remain unchanged.
+    function _phase3ToDeployOutput(
+        OPContractsManager.DeployPhase3Output memory _phase3
+    )
+        internal
+        pure
+        returns (OPContractsManager.DeployOutput memory output)
+    {
+        output.addressManager = _phase3.addressManager;
+        output.opChainProxyAdmin = _phase3.opChainProxyAdmin;
+        output.l1ERC721BridgeProxy = _phase3.l1ERC721BridgeProxy;
+        output.optimismPortalProxy = _phase3.optimismPortalProxy;
+        output.ethLockboxProxy = _phase3.ethLockboxProxy;
+        output.systemConfigProxy = _phase3.systemConfigProxy;
+        output.optimismMintableERC20FactoryProxy = _phase3.optimismMintableERC20FactoryProxy;
+        output.disputeGameFactoryProxy = _phase3.disputeGameFactoryProxy;
+        output.anchorStateRegistryProxy = _phase3.anchorStateRegistryProxy;
+        output.l1StandardBridgeProxy = _phase3.l1StandardBridgeProxy;
+        output.l1CrossDomainMessengerProxy = _phase3.l1CrossDomainMessengerProxy;
+        output.delayedWETHPermissionedGameProxy = _phase3.delayedWETHPermissionedGameProxy;
+        // Note: faultDisputeGame, permissionedDisputeGame, delayedWETHPermissionlessGameProxy
+        // are set during initialization, not deployment
+    }
+
+    /// @notice Phase 4: Initialize all proxies and finalize deployment.
+    /// @dev This phase initializes all contracts and transfers ownership.
+    /// @param _input The deploy input parameters.
+    /// @param _phase3 The output from phase 3.
+    /// @param _superchainConfig The superchain config for the chain.
+    /// @param _deployer The address to emit as the deployer.
+    /// @return output The final deploy output.
+    function deployPhase4(
+        OPContractsManager.DeployInput calldata _input,
+        OPContractsManager.DeployPhase3Output calldata _phase3,
+        ISuperchainConfig _superchainConfig,
+        address _deployer
+    )
+        external
+        virtual
+        returns (OPContractsManager.DeployOutput memory output)
+    {
+        OPContractsManager.Implementations memory implementation = getImplementations();
+
+        // Convert phase 3 output to DeployOutput for encoder functions
+        output = _phase3ToDeployOutput(_phase3);
+
+        // -------- Set and Initialize Proxy Implementations --------
+        bytes memory data;
+
+        data = encodeL1ERC721BridgeInitializer(output);
+        upgradeToAndCall(
+            output.opChainProxyAdmin, address(output.l1ERC721BridgeProxy), implementation.l1ERC721BridgeImpl, data
+        );
+
+        data = encodeSystemConfigInitializer(_input, output, _superchainConfig);
+        upgradeToAndCall(
+            output.opChainProxyAdmin, address(output.systemConfigProxy), implementation.systemConfigImpl, data
+        );
+
+        if (_input.useCustomGasToken) {
+            output.systemConfigProxy.setFeature(Features.CUSTOM_GAS_TOKEN, true);
+        }
+
+        if (isDevFeatureEnabled(DevFeatures.OPTIMISM_PORTAL_INTEROP)) {
+            output.systemConfigProxy.setFeature(Features.ETH_LOCKBOX, true);
+        }
+
+        if (isDevFeatureEnabled(DevFeatures.OPTIMISM_PORTAL_INTEROP)) {
+            data = encodeOptimismPortalInteropInitializer(output);
+            upgradeToAndCall(
+                output.opChainProxyAdmin,
+                address(output.optimismPortalProxy),
+                implementation.optimismPortalInteropImpl,
+                data
+            );
+        } else {
+            data = encodeOptimismPortalInitializer(output);
+            upgradeToAndCall(
+                output.opChainProxyAdmin, address(output.optimismPortalProxy), implementation.optimismPortalImpl, data
+            );
+        }
+
+        IOptimismPortal[] memory portals = new IOptimismPortal[](1);
+        portals[0] = output.optimismPortalProxy;
+        data = encodeETHLockboxInitializer(output, portals);
+        upgradeToAndCall(output.opChainProxyAdmin, address(output.ethLockboxProxy), implementation.ethLockboxImpl, data);
+
+        data = encodeOptimismMintableERC20FactoryInitializer(output);
+        upgradeToAndCall(
+            output.opChainProxyAdmin,
+            address(output.optimismMintableERC20FactoryProxy),
+            implementation.optimismMintableERC20FactoryImpl,
+            data
+        );
+
+        data = encodeL1CrossDomainMessengerInitializer(output);
+        upgradeToAndCall(
+            output.opChainProxyAdmin,
+            address(output.l1CrossDomainMessengerProxy),
+            implementation.l1CrossDomainMessengerImpl,
+            data
+        );
+
+        data = encodeL1StandardBridgeInitializer(output);
+        upgradeToAndCall(
+            output.opChainProxyAdmin, address(output.l1StandardBridgeProxy), implementation.l1StandardBridgeImpl, data
+        );
+
+        data = encodeDelayedWETHInitializer(output);
+        upgradeToAndCall(
+            output.opChainProxyAdmin,
+            address(output.delayedWETHPermissionedGameProxy),
+            implementation.delayedWETHImpl,
+            data
+        );
+
+        data = encodeDisputeGameFactoryInitializer();
+        upgradeToAndCall(
+            output.opChainProxyAdmin,
+            address(output.disputeGameFactoryProxy),
+            implementation.disputeGameFactoryImpl,
+            data
+        );
+
+        _registerPermissionedGameV2(_input, implementation, output);
+
+        transferOwnership(address(output.disputeGameFactoryProxy), address(_input.roles.opChainProxyAdminOwner));
+
+        data = encodeAnchorStateRegistryInitializer(_input, output);
+        upgradeToAndCall(
+            output.opChainProxyAdmin,
+            address(output.anchorStateRegistryProxy),
+            implementation.anchorStateRegistryImpl,
+            data
+        );
+
+        // -------- Finalize Deployment --------
+        transferOwnership(address(output.opChainProxyAdmin), _input.roles.opChainProxyAdminOwner);
+
+        emit Deployed(_input.l2ChainId, _deployer, abi.encode(output));
+    }
+
+    // ============================================================
+    // ==================== ORIGINAL DEPLOY =======================
+    // ============================================================
+
     /// @notice Deploys a new OP Stack chain.
     /// @param _input The deploy input parameters for the deployment.
     /// @param _superchainConfig The superchain config for the chain.
@@ -1904,6 +2192,45 @@ contract OPContractsManager is ISemver {
         IPermissionedDisputeGame permissionedDisputeGame;
         IDelayedWETH delayedWETHPermissionedGameProxy;
         IDelayedWETH delayedWETHPermissionlessGameProxy;
+    }
+
+    /// @notice Phase 1 output: Singletons (AddressManager, ProxyAdmin)
+    struct DeployPhase1Output {
+        IAddressManager addressManager;
+        IProxyAdmin opChainProxyAdmin;
+    }
+
+    /// @notice Phase 2 output: ERC-1967 Proxies
+    struct DeployPhase2Output {
+        // Include phase 1 outputs
+        IAddressManager addressManager;
+        IProxyAdmin opChainProxyAdmin;
+        // Phase 2 deployments
+        IL1ERC721Bridge l1ERC721BridgeProxy;
+        IOptimismPortal optimismPortalProxy;
+        IETHLockbox ethLockboxProxy;
+        ISystemConfig systemConfigProxy;
+        IOptimismMintableERC20Factory optimismMintableERC20FactoryProxy;
+        IDisputeGameFactory disputeGameFactoryProxy;
+        IAnchorStateRegistry anchorStateRegistryProxy;
+    }
+
+    /// @notice Phase 3 output: Legacy Proxies
+    struct DeployPhase3Output {
+        // Include phase 2 outputs
+        IAddressManager addressManager;
+        IProxyAdmin opChainProxyAdmin;
+        IL1ERC721Bridge l1ERC721BridgeProxy;
+        IOptimismPortal optimismPortalProxy;
+        IETHLockbox ethLockboxProxy;
+        ISystemConfig systemConfigProxy;
+        IOptimismMintableERC20Factory optimismMintableERC20FactoryProxy;
+        IDisputeGameFactory disputeGameFactoryProxy;
+        IAnchorStateRegistry anchorStateRegistryProxy;
+        // Phase 3 deployments
+        IL1StandardBridge l1StandardBridgeProxy;
+        IL1CrossDomainMessenger l1CrossDomainMessengerProxy;
+        IDelayedWETH delayedWETHPermissionedGameProxy;
     }
 
     /// @notice Addresses of ERC-5202 Blueprint contracts. There are used for deploying full size
