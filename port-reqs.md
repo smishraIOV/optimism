@@ -4,6 +4,7 @@ We have to enforce some restrictions on how the rollup works - all of them arise
 
 1. We must deploy contracts on L1 in a way so that no deployment transaction consumes more than 4 million gas.
 2. We must enforce that all L1 transactions from the rollup must be created in legacy format - i.e. without any eip-1559 gas fields: thus, any rollup component or operator account that generates L1 transactions must be modified to use legacy format
+3. **[PENDING]** We must ensure op-node can handle L1 block/header formats that differ from Ethereum mainnet, particularly pre-Cancun or pre-London formats.
 
 To test the above restrictions, we can run anvil with a low block gas limit of around 6.5M and restrict it to legacy transactions only.
 
@@ -17,6 +18,7 @@ To test the above restrictions, we can run anvil with a low block gas limit of a
 |-------------|---------------------|------------|----------|
 | 4M gas limit per tx | op-deployer, forge scripts | High | Split contract deployments |
 | Legacy transactions | op-batcher, op-proposer, op-challenger | Medium | Modify txmgr |
+| L1 block format compatibility | op-node | Medium-High | Modify L1 block/header parsing |
 
 ---
 
@@ -738,17 +740,289 @@ cast code $PORTAL --rpc-url http://localhost:8545 | head -c 100
 
 ---
 
-### Change B: Reduce Large CREATE2 Deployments ⏳ PENDING
+### Change B: Reduce Large CREATE2 Deployments
 
 **Status:** Not yet implemented
 
 The CREATE2 deployments in blocks 14 and 15 (4.5M and 5.4M gas) still exceed 4M. This requires implementing a factory pattern to deploy large bytecode in chunks.
 
+We skip this for now since contract deployments are working with a block gaslimit of 6.5M - which should be adequate.
+
 ---
 
-### Requirement 2: Legacy Transactions ⏳ PENDING
+### Requirement 2: Legacy Transactions ✅ COMPLETED
+
+**Status:** Implemented in `op-service/txmgr/`
+
+#### Changes Made
+
+**1. Added CLI Flag and Configuration (cli.go)**
+
+```go
+// New flag constant (line 50)
+UseLegacyTxFlagName = "txmgr.use-legacy-tx"
+
+// New CLI flag definition (added to CLIFlagsWithDefaults)
+&cli.BoolFlag{
+    Name:    UseLegacyTxFlagName,
+    Usage:   "Use legacy (Type 0) transactions instead of EIP-1559 (Type 2). Required for chains that don't support EIP-1559.",
+    EnvVars: prefixEnvVars("TXMGR_USE_LEGACY_TX"),
+}
+
+// Added to CLIConfig struct
+UseLegacyTx bool
+
+// Added to Config struct
+UseLegacyTx bool
+```
+
+**2. Modified Transaction Creation (txmgr.go:craftTx)**
+
+```go
+// In craftTx(), after blob tx handling:
+} else if m.cfg.UseLegacyTx {
+    // Legacy transaction: combine base fee and tip into a single gas price
+    gasPrice := new(big.Int).Add(baseFee, gasTipCap)
+    txMessage = &types.LegacyTx{
+        To:       candidate.To,
+        GasPrice: gasPrice,
+        Value:    candidate.Value,
+        Data:     candidate.TxData,
+        Gas:      candidate.GasLimit,
+    }
+    m.l.Debug("crafting Legacy transaction", "gasPrice", gasPrice)
+} else {
+    // EIP-1559 transaction (existing code)
+    txMessage = &types.DynamicFeeTx{...}
+}
+```
+
+**3. Modified Fee Bumping (txmgr.go:increaseGasPrice)**
+
+```go
+// In increaseGasPrice(), after blob tx handling:
+} else if tx.Type() == types.LegacyTxType {
+    // Legacy transaction: combine bumped fee and tip into a single gas price
+    bumpedPrice := new(big.Int).Add(bumpedFee, bumpedTip)
+    newTx = types.NewTx(&types.LegacyTx{
+        Nonce:    tx.Nonce(),
+        To:       tx.To(),
+        GasPrice: bumpedPrice,
+        Value:    tx.Value(),
+        Data:     tx.Data(),
+        Gas:      gas,
+    })
+    m.l.Debug("bumping legacy transaction gas price", "oldGasPrice", tx.GasPrice(), "newGasPrice", bumpedPrice)
+} else {
+    // DynamicFeeTx (existing code)
+}
+```
+
+#### How It Works
+
+| Transaction Type | Gas Price Fields | When Used |
+|------------------|------------------|-----------|
+| Legacy (Type 0) | Single `gasPrice` | `--txmgr.use-legacy-tx=true` |
+| EIP-1559 (Type 2) | `gasTipCap` + `gasFeeCap` | Default behavior |
+| Blob (Type 3) | EIP-1559 + `blobGasFeeCap` | When sending blobs |
+
+For legacy transactions, the `gasPrice` is calculated as `baseFee + gasTipCap`, matching the effective gas price of an EIP-1559 transaction.
+
+#### Files Modified
+
+| File | Changes |
+|------|---------|
+| `op-service/txmgr/cli.go` | +15 lines: flag constant, CLI flag, struct fields, wiring |
+| `op-service/txmgr/txmgr.go` | +20 lines: legacy tx creation in `craftTx()` and `increaseGasPrice()` |
+
+#### Verification
+
+All components compile successfully:
+```bash
+go build ./op-service/txmgr/...
+go build ./op-batcher/...
+go build ./op-proposer/...
+go build ./op-challenger/...
+```
+
+#### Usage
+
+**CLI flags (per component):**
+```bash
+op-batcher --txmgr.use-legacy-tx=true ...
+op-proposer --txmgr.use-legacy-tx=true ...
+op-challenger --txmgr.use-legacy-tx=true ...
+```
+
+**Environment variables:**
+```bash
+export OP_BATCHER_TXMGR_USE_LEGACY_TX=true
+export OP_PROPOSER_TXMGR_USE_LEGACY_TX=true
+export OP_CHALLENGER_TXMGR_USE_LEGACY_TX=true
+```
+
+**Example: Update batcher start script**
+```bash
+# In rollup/batcher/scripts/start-batcher.sh, add:
+--txmgr.use-legacy-tx=true \
+```
+
+#### Testing
+
+**Option 1: Pre-EIP-1559 chain (Berlin hardfork)**
+```bash
+# Anvil rejects EIP-1559 transactions in Berlin mode
+anvil --mnemonic-seed-unsafe 2 --hardfork berlin --block-time 15
+
+# Start batcher with legacy mode
+OP_BATCHER_TXMGR_USE_LEGACY_TX=true ./scripts/start-batcher.sh
+```
+
+**Option 2: Verify transaction type manually**
+```bash
+# After batcher submits a transaction, check its type
+cast tx <TX_HASH> --rpc-url http://localhost:8545
+
+# Look for: type: 0 (legacy) vs type: 2 (EIP-1559)
+```
+
+**Option 3: Script to verify all L1 transactions**
+```python
+# Check that all transactions from rollup components are legacy
+python3 << 'EOF'
+import json, urllib.request
+
+def rpc(method, params=[]):
+    data = json.dumps({"jsonrpc": "2.0", "method": method, "params": params, "id": 1}).encode()
+    req = urllib.request.Request("http://localhost:8545", data=data, headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req) as resp:
+        return json.loads(resp.read())["result"]
+
+# Addresses to check (batcher, proposer, challenger)
+ROLLUP_ADDRESSES = [
+    "0xdEBD3CFCd414E09D5c97b020dE7cE74d6c4e6DC9",  # Batcher
+    "0xa683a3E33E07fb84ff33FcE753Da1d248298977f",  # Proposer
+]
+
+latest = int(rpc("eth_blockNumber"), 16)
+for i in range(latest + 1):
+    block = rpc("eth_getBlockByNumber", [hex(i), True])
+    for tx in block.get("transactions", []):
+        if tx["from"].lower() in [a.lower() for a in ROLLUP_ADDRESSES]:
+            tx_type = int(tx.get("type", "0x0"), 16)
+            status = "✓ Legacy" if tx_type == 0 else "✗ EIP-1559"
+            print(f"Block {i}: {tx['hash'][:16]}... {status}")
+EOF
+```
+
+---
+
+### Requirement 3: L1 Block Format Compatibility ⏳ PENDING
 
 **Status:** Not yet implemented
 
-The txmgr modifications to support `--txmgr.use-legacy-tx` flag have not been implemented yet.
+#### Problem Statement
+
+The op-node reads L1 blocks and block headers to derive the L2 chain. Currently, it expects L1 data in Ethereum mainnet format (post-Cancun). If the L1 chain uses a different block format (e.g., pre-Cancun, pre-London, or a custom format), op-node may fail to parse the data correctly.
+
+#### L1 Block Header Fields by Hardfork
+
+| Field | Pre-London | London+ | Cancun+ |
+|-------|------------|---------|---------|
+| `parentHash` | ✓ | ✓ | ✓ |
+| `sha3Uncles` | ✓ | ✓ | ✓ |
+| `miner` | ✓ | ✓ | ✓ |
+| `stateRoot` | ✓ | ✓ | ✓ |
+| `transactionsRoot` | ✓ | ✓ | ✓ |
+| `receiptsRoot` | ✓ | ✓ | ✓ |
+| `logsBloom` | ✓ | ✓ | ✓ |
+| `difficulty` | ✓ | ✓ | ✓ (often 0) |
+| `number` | ✓ | ✓ | ✓ |
+| `gasLimit` | ✓ | ✓ | ✓ |
+| `gasUsed` | ✓ | ✓ | ✓ |
+| `timestamp` | ✓ | ✓ | ✓ |
+| `extraData` | ✓ | ✓ | ✓ |
+| `mixHash` | ✓ | ✓ | ✓ |
+| `nonce` | ✓ | ✓ | ✓ |
+| `baseFeePerGas` | ✗ | ✓ | ✓ |
+| `withdrawalsRoot` | ✗ | ✗ | ✓ |
+| `blobGasUsed` | ✗ | ✗ | ✓ |
+| `excessBlobGas` | ✗ | ✗ | ✓ |
+| `parentBeaconBlockRoot` | ✗ | ✗ | ✓ |
+
+#### Areas to Investigate
+
+1. **op-node L1 block fetching** (`op-node/rollup/derive/`)
+   - How does op-node parse L1 block headers?
+   - Does it require fields that may not exist on older/custom L1s?
+   - Can it handle missing `baseFeePerGas` (pre-London)?
+   - Can it handle missing blob fields (pre-Cancun)?
+
+2. **L1 chain config** (`op-node/rollup/derive/l1_retrieval.go`)
+   - How does op-node determine which L1 hardfork is active?
+   - Does it use the `l1-chain-config.json` we provide?
+
+3. **go-ethereum types** (`github.com/ethereum/go-ethereum/core/types`)
+   - The `Header` struct has optional fields - are they handled correctly?
+   - Does JSON unmarshaling fail on missing fields?
+
+4. **Beacon client integration** (`op-node/sources/l1_beacon_client.go`)
+   - Pre-Cancun L1s don't have a beacon chain for blobs
+   - Can op-node work without blob support?
+
+#### Potential Issues
+
+| Scenario | Expected Behavior | Risk |
+|----------|-------------------|------|
+| L1 is pre-London (no EIP-1559) | `baseFeePerGas` missing from headers | op-node may fail to parse headers |
+| L1 is pre-Cancun (no blobs) | No blob fields, no beacon endpoint | op-node may require beacon URL |
+| L1 uses custom header fields | Extra/different fields in RPC response | JSON parsing may fail |
+| L1 doesn't support `eth_getBlockByNumber` with full txs | Different RPC behavior | Data fetching may fail |
+
+#### Required Changes (TBD)
+
+1. **Make blob support optional**
+   - Allow op-node to run without beacon client
+   - Skip blob-related derivation if L1 doesn't support it
+   - Already partially addressed with `--l1.beacon.ignore=true`
+
+2. **Handle missing header fields gracefully**
+   - `baseFeePerGas`: Default to 0 or a configured value if missing
+   - Blob fields: Treat as 0/nil if missing
+   - Add fallback parsing logic
+
+3. **Configurable L1 compatibility mode**
+   - Add flag like `--l1.compatibility-mode=pre-cancun`
+   - Adjust parsing and validation based on mode
+
+4. **Test with different Anvil hardforks**
+   ```bash
+   # Test pre-London (no EIP-1559)
+   anvil --hardfork berlin
+
+   # Test pre-Cancun (no blobs)
+   anvil --hardfork shanghai
+
+   # Test with blobs
+   anvil --hardfork cancun
+   ```
+
+#### Files to Investigate
+
+| File | Purpose |
+|------|---------|
+| `op-node/rollup/derive/l1_retrieval.go` | L1 block fetching |
+| `op-node/rollup/derive/l1_traversal.go` | L1 chain traversal |
+| `op-node/sources/eth_client.go` | L1 RPC client |
+| `op-node/sources/l1_client.go` | L1 data source |
+| `op-node/sources/l1_beacon_client.go` | Beacon chain client |
+| `op-service/eth/types.go` | Block/header type definitions |
+
+#### Next Steps
+
+1. Run op-node against Anvil in `--hardfork berlin` mode and observe errors
+2. Identify which fields cause parsing failures
+3. Trace through the code to understand the parsing logic
+4. Implement graceful handling for missing fields
+5. Add configuration options for L1 compatibility mode
 

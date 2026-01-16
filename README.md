@@ -1,3 +1,11 @@
+This is a fork of optimism for experimentation. The documentation is currently in 2 files:
+* [L2 rollup deployment log](./L2_ROLLUP_DEPLOYMENT_LOG.md): mostly follows the [tutorial](https://docs.optimism.io/chain-operators/tutorials/create-l2-rollup/create-l2-rollup) on optimism
+* [Mods to port](port-reqs.md)  to other base layer e.g. Rootstock
+
+What follows below is from the original repo.
+
+---
+
 <div align="center">
   <br />
   <br />

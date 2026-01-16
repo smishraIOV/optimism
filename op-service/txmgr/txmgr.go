@@ -413,6 +413,17 @@ func (m *SimpleTxManager) craftTx(ctx context.Context, candidate TxCandidate) (*
 			return nil, fmt.Errorf("failed to create blob transaction: %w", err)
 		}
 		txMessage = message
+	} else if m.cfg.UseLegacyTx {
+		// Legacy transaction: combine base fee and tip into a single gas price
+		gasPrice := new(big.Int).Add(baseFee, gasTipCap)
+		txMessage = &types.LegacyTx{
+			To:       candidate.To,
+			GasPrice: gasPrice,
+			Value:    candidate.Value,
+			Data:     candidate.TxData,
+			Gas:      candidate.GasLimit,
+		}
+		m.l.Debug("crafting Legacy transaction", "gasPrice", gasPrice)
 	} else {
 		txMessage = &types.DynamicFeeTx{
 			ChainID:   m.chainID,
@@ -987,6 +998,18 @@ func (m *SimpleTxManager) increaseGasPrice(ctx context.Context, tx *types.Transa
 			return nil, err
 		}
 		newTx = types.NewTx(message)
+	} else if tx.Type() == types.LegacyTxType {
+		// Legacy transaction: combine bumped fee and tip into a single gas price
+		bumpedPrice := new(big.Int).Add(bumpedFee, bumpedTip)
+		newTx = types.NewTx(&types.LegacyTx{
+			Nonce:    tx.Nonce(),
+			To:       tx.To(),
+			GasPrice: bumpedPrice,
+			Value:    tx.Value(),
+			Data:     tx.Data(),
+			Gas:      gas,
+		})
+		m.l.Debug("bumping legacy transaction gas price", "oldGasPrice", tx.GasPrice(), "newGasPrice", bumpedPrice)
 	} else {
 		newTx = types.NewTx(&types.DynamicFeeTx{
 			ChainID:   tx.ChainId(),

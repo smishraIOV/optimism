@@ -47,6 +47,7 @@ const (
 	ReceiptQueryIntervalFlagName       = "txmgr.receipt-query-interval"
 	AlreadyPublishedCustomErrsFlagName = "txmgr.already-published-custom-errs"
 	CellProofTimeFlagName              = "txmgr.cell-proof-time"
+	UseLegacyTxFlagName                = "txmgr.use-legacy-tx"
 )
 
 var (
@@ -251,6 +252,11 @@ func CLIFlagsWithDefaults(envPrefix string, defaults DefaultFlagValues) []cli.Fl
 			EnvVars: prefixEnvVars("TXMGR_CELL_PROOF_TIME"),
 			Value:   defaults.CellProofTime,
 		},
+		&cli.BoolFlag{
+			Name:    UseLegacyTxFlagName,
+			Usage:   "Use legacy (Type 0) transactions instead of EIP-1559 (Type 2). Required for chains that don't support EIP-1559.",
+			EnvVars: prefixEnvVars("TXMGR_USE_LEGACY_TX"),
+		},
 	}, opsigner.CLIFlags(envPrefix, "")...)
 }
 
@@ -280,6 +286,7 @@ type CLIConfig struct {
 	TxNotInMempoolTimeout      time.Duration
 	AlreadyPublishedCustomErrs []string
 	CellProofTime              uint64
+	UseLegacyTx                bool
 }
 
 func NewCLIConfig(l1RPCURL string, defaults DefaultFlagValues) CLIConfig {
@@ -384,6 +391,7 @@ func ReadCLIConfig(ctx cliiface.Context) CLIConfig {
 		TxNotInMempoolTimeout:      ctx.Duration(TxNotInMempoolTimeoutFlagName),
 		AlreadyPublishedCustomErrs: ctx.StringSlice(AlreadyPublishedCustomErrsFlagName),
 		CellProofTime:              ctx.Uint64(CellProofTimeFlagName),
+		UseLegacyTx:                ctx.Bool(UseLegacyTxFlagName),
 	}
 }
 
@@ -469,6 +477,7 @@ func NewConfig(cfg CLIConfig, l log.Logger) (*Config, error) {
 		SafeAbortNonceTooLowCount:  cfg.SafeAbortNonceTooLowCount,
 		AlreadyPublishedCustomErrs: cfg.AlreadyPublishedCustomErrs,
 		CellProofTime:              cellProofTime,
+		UseLegacyTx:                cfg.UseLegacyTx,
 	}
 
 	res.RebroadcastInterval.Store(int64(cfg.RebroadcastInterval))
@@ -583,6 +592,10 @@ type Config struct {
 
 	// CellProofTime is the time at which cell proofs are enabled in blob transaction (for Fusaka (EIP-7742) compatibility).
 	CellProofTime uint64
+
+	// UseLegacyTx enables legacy (Type 0) transactions instead of EIP-1559 (Type 2).
+	// Required for chains that don't support EIP-1559.
+	UseLegacyTx bool
 }
 
 func (m *Config) Check() error {
