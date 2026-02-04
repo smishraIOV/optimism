@@ -105,8 +105,15 @@ func (f *RPCReceiptsFetcher) FetchReceipts(ctx context.Context, blockInfo eth.Bl
 		return nil, err
 	}
 
-	if err = validateReceipts(block, blockInfo.ReceiptHash(), txHashes, result); err != nil {
-		return nil, err
+	// RSK uses a binary trie instead of Ethereum's hexary MPT for receipt verification
+	if f.provKind == RPCKindRSK {
+		if err = validateReceiptsRSK(block, blockInfo.ReceiptHash(), txHashes, result); err != nil {
+			return nil, err
+		}
+	} else {
+		if err = validateReceipts(block, blockInfo.ReceiptHash(), txHashes, result); err != nil {
+			return nil, err
+		}
 	}
 
 	return
@@ -169,6 +176,7 @@ const (
 	RPCKindBasic      RPCProviderKind = "basic"    // try only the standard most basic receipt fetching
 	RPCKindAny        RPCProviderKind = "any"      // try any method available
 	RPCKindStandard   RPCProviderKind = "standard" // try standard methods, including newer optimized standard RPC methods
+	RPCKindRSK        RPCProviderKind = "rsk"      // RSK/Rootstock - uses binary trie for receipt verification
 )
 
 var RPCProviderKinds = []RPCProviderKind{
@@ -182,6 +190,7 @@ var RPCProviderKinds = []RPCProviderKind{
 	RPCKindBasic,
 	RPCKindAny,
 	RPCKindStandard,
+	RPCKindRSK,
 }
 
 func (kind RPCProviderKind) String() string {
@@ -339,6 +348,10 @@ func AvailableReceiptsFetchingMethods(kind RPCProviderKind) ReceiptsFetchingMeth
 	case RPCKindErigon:
 		return ErigonGetBlockReceiptsByBlockHash | EthGetTransactionReceiptBatch
 	case RPCKindBasic:
+		return EthGetTransactionReceiptBatch
+	case RPCKindRSK:
+		// RSK (Rootstock) uses basic receipt fetching - eth_getTransactionReceipt
+		// Receipt verification uses RSK's binary trie instead of Ethereum's hexary MPT
 		return EthGetTransactionReceiptBatch
 	case RPCKindAny:
 		// if it's any kind of RPC provider, then try all methods

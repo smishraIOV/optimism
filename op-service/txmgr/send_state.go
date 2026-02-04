@@ -123,10 +123,11 @@ func (s *SendState) CriticalError() error {
 	case s.nonceTooLowCount >= s.safeAbortNonceTooLowCount:
 		// we have exceeded the nonce too low count
 		return core.ErrNonceTooLow
-	case s.successfulPublishCount == 0 && s.nonceTooLowCount > 0:
-		// A nonce too low error before successfully publishing any transaction means the tx will
-		// need a different nonce, which we can force by returning error.
-		return core.ErrNonceTooLow
+	// NOTE: Removed early-abort on first "nonce too low" when successfulPublishCount == 0.
+	// On chains like RSKj that return errors for pending txs (e.g., "wasn't mined"),
+	// the first publish might actually succeed but not be recorded as such before a
+	// gas bump attempt returns "nonce too low". We now always wait for safeAbortNonceTooLowCount
+	// errors before aborting, giving time for the original tx to confirm.
 	case s.successfulPublishCount == 0 && s.now().After(s.txInMempoolDeadline):
 		// unable to get the tx into the mempool in the allotted time
 		return ErrMempoolDeadlineExpired

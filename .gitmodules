@@ -41,3 +41,6 @@
 [submodule "kona"]
 	path = kona
 	url = git@github.com:op-rs/kona.git
+[submodule "op-service/rsk/gorsk"]
+	path = op-service/rsk/gorsk
+	url = https://github.com/smishraIOV/gorsk.git

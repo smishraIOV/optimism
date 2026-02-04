@@ -80,10 +80,33 @@ mkdir -p rollup/sequencer/scripts
 
 ## Step 3: Start Local L1 Network (Anvil)
 
-**Terminal 1:**
+**Terminal 1: Local Ethereum**
+
+Either run rskj or Anvil
+```
+# from rskj
+java -Drpc.providers.web.http.port=8545 \
+   -Drpc.providers.web.http.bind_address=0.0.0.0 \
+   -Dminer.client.autoMine=true\
+   -cp rskj-core/build/libs/rskj-core-8.2.0-SNAPSHOT-all.jar \
+   co.rsk.Start --regtest --reset
+```
+
+Since some of the config was initially developed using anvil seed 2 accounts, run `fund_anvil_rskj.sh` to fund those
+accounts on RSKJ regtest (or add the private keys to rsk regtest.conf, or use regtest "cow" accounts)
+
+### Deterministic Deployer for create2
+Then as mentioned in port-reqs.md we need to deploy the deterministic deployer
+
+
+
+If running rskj, `chainID` needs to be switched to 33 from Anvil.
+
+
+May be mistake in documentation, but hardfor cancun lead to errors in deployment
 
 ```bash
-anvil --mnemonic-seed-unsafe 2 --hardfork cancun --block-time 15
+anvil --mnemonic-seed-unsafe 2 --hardfork cancun --block-time 15 #--hardfork cancun causing deployment errors
 ```
 
 | Flag | Purpose |
@@ -91,13 +114,14 @@ anvil --mnemonic-seed-unsafe 2 --hardfork cancun --block-time 15
 | `--mnemonic-seed-unsafe 2` | Deterministic accounts for reproducibility |
 | `--hardfork cancun` | Required for Ecotone/blob support |
 | `--block-time 15` | Interval mining - similar to mainnet (~12s), ensures L2 can keep up |
+| `--port 4444` | can be used for rootstock
 
 > **Tip:** To pause/resume interval mining (e.g., to let L2 catch up):
 > - Pause: `cast rpc evm_setIntervalMining 0 --rpc-url http://localhost:8545`
 > - Resume: `cast rpc evm_setIntervalMining 2 --rpc-url http://localhost:8545`
 
 **RPC URL:** `http://localhost:8545`
-**Chain ID:** `31337`
+**Chain ID:** `31337` and `33` for rootstock regtest
 
 ### Anvil Seed 2 Accounts
 
@@ -117,13 +141,13 @@ We use these pre-funded accounts for all rollup roles:
 **Mnemonic:** `cabbage measure motor lazy return bind siren again diesel slight bike shock`
 
 
-
-
 ---
 
 ## Step 4: Initialize and Configure Intent File
 
 **From `rollup/deployer` directory:**
+
+Using chainId 33 for RSK regtest, Anvil will be 31337
 
 ```bash
 cd rollup/deployer
@@ -131,7 +155,7 @@ cd rollup/deployer
 ../../op-deployer/bin/op-deployer init \
   --intent-type custom \
   --workdir .deployer \
-  --l1-chain-id 31337 \
+  --l1-chain-id 33 \
   --l2-chain-ids 42069
 ```
 
@@ -148,6 +172,15 @@ fundDevAccounts = false
 l1ContractsLocator = "embedded"
 l2ContractsLocator = "embedded"
 
+# Anvil Seed 2 Accounts:
+# 0: 0x8995e44a22e303a79bdd2e6e41674fb92d620863 (deployer)
+# 1: 0xe9e05c9f02e10fa833d379cb1c7ac3a3f23b247e (fee recipient)
+# 2: 0x61da7c7f97ebe53ad7c4e5ecd3d117e7ab430ea7 (systemConfigOwner)
+# 3: 0x5b0248e30583ced4f09726c547935552c469eb24 (unsafeBlockSigner)
+# 4: 0xcdbc8abb83e01bae13ece8853a5ca84b2ef6ca86 (batcher)
+# 5: 0xa683a3e33e07fb84ff33fce753da1d248298977f (proposer)
+# 6: 0x008099bfee75e832e1b93d4c023f646d99d4c90f (challenger)
+
 [superchainRoles]
   SuperchainProxyAdminOwner = "0x8995e44a22e303a79bdd2e6e41674fb92d620863"
   SuperchainGuardian = "0x8995e44a22e303a79bdd2e6e41674fb92d620863"
@@ -159,7 +192,16 @@ l2ContractsLocator = "embedded"
   baseFeeVaultRecipient = "0xe9e05c9f02e10fa833d379cb1c7ac3a3f23b247e"
   l1FeeVaultRecipient = "0xe9e05c9f02e10fa833d379cb1c7ac3a3f23b247e"
   sequencerFeeVaultRecipient = "0xe9e05c9f02e10fa833d379cb1c7ac3a3f23b247e"
-  # ... other fields auto-generated ...
+  operatorFeeVaultRecipient = "0xe9e05c9f02e10fa833d379cb1c7ac3a3f23b247e"
+  eip1559DenominatorCanyon = 250
+  eip1559Denominator = 50
+  eip1559Elasticity = 6
+  gasLimit = 60000000
+  operatorFeeScalar = 0
+  operatorFeeConstant = 0
+  chainFeesRecipient = "0xe9e05c9f02e10fa833d379cb1c7ac3a3f23b247e"
+  minBaseFee = 1000000
+  daFootprintGasScalar = 0
   [chains.roles]
     l1ProxyAdminOwner = "0x8995e44a22e303a79bdd2e6e41674fb92d620863"
     l2ProxyAdminOwner = "0x8995e44a22e303a79bdd2e6e41674fb92d620863"
@@ -184,6 +226,8 @@ l2ContractsLocator = "embedded"
   --l1-rpc-url http://localhost:8545 \
   --private-key 0xd6a036f561e03196779dd34bf3d141dec4737eec5ed0416e413985ca05dad51a
 ```
+
+Add `  --phased-deployment` to the above for RSK current gaslimit of 6.8M. In regtest this was increased to 10M (see port-reqs.md)
 
 This deploys all L1 contracts and saves state to `.deployer/state.json`.
 
@@ -280,7 +324,7 @@ This file tells op-node about the L1 chain configuration (required for unknown c
 cat > l1-chain-config.json << 'EOF'
 {
   "config": {
-    "chainId": 31337,
+    "chainId": 33,
     "homesteadBlock": 0,
     "eip150Block": 0,
     "eip155Block": 0,
@@ -331,6 +375,9 @@ EOF
 # Use --state.scheme=hash for archive mode compatibility
 ../op-geth/build/bin/geth init --datadir op-geth-data --state.scheme=hash genesis.json
 ```
+
+running the above had an error about "head block not reachable". running it again, it worked? (no errors)
+
 
 **⚠️ Get the L2 genesis hash** (the init output truncates it):
 

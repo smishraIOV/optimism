@@ -22,6 +22,70 @@ To test the above restrictions, we can run anvil with a low block gas limit of a
 
 ---
 
+### Prerequisite: Deploy Deterministic Deployer (CREATE2 Factory)
+
+The OP Stack uses CREATE2 for deterministic contract deployments. This requires a "deterministic deployer" contract at address `0x4e59b44847b379578588920cA78FbF26c0B4956C`. This contract is pre-deployed on Ethereum mainnet and most testnets, but **not on RSK**.
+
+If you run `op-deployer apply` without this contract, you'll see:
+```
+Application failed: error in pipeline stage apply: deterministic deployer is not deployed on this chain - please deploy it first
+```
+
+#### Deployment Steps
+
+**Step 1: Fund the deployer signer account**
+
+The CREATE2 factory is deployed via a pre-signed transaction. The signer account `0x3fab184622dc19b6109349b94811493bf2a45362` needs gas to broadcast it.
+
+```bash
+# Using RSK's pre-funded "cow" account (regtest)
+cast send --private-key "c85ef7d79691fe79573b1a7064c19c1a9819ebdbd1faaab1a8ec92344438aaf4" \
+  --rpc-url "http://localhost:8545" \
+  0x3fab184622dc19b6109349b94811493bf2a45362 \
+  --value 100000000000000000 \
+  --legacy \
+  --gas-price 60000000
+```
+
+Note: The `--legacy` and `--gas-price` flags are required for RSK (no EIP-1559 support).
+
+**Step 2: Broadcast the pre-signed deployment transaction**
+
+This raw transaction deploys the CREATE2 factory to the deterministic address:
+
+```bash
+cast publish --rpc-url http://localhost:8545 \
+  0xf8a58085174876e800830186a08080b853604580600e600039806000f350fe7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe03601600081602082378035828234f58015156039578182fd5b8082525050506014600cf31ba02222222222222222222222222222222222222222222222222222222222222222a02222222222222222222222222222222222222222222222222222222222222222
+```
+
+**Step 3: Verify deployment**
+
+```bash
+cast code --rpc-url http://localhost:8545 0x4e59b44847b379578588920cA78FbF26c0B4956C
+```
+
+If successful, this returns bytecode (not `0x`). The contract is now deployed at:
+- **Address:** `0x4e59b44847b379578588920cA78FbF26c0B4956C`
+- **Gas used:** ~68,137 (0x10a29)
+
+#### How it works
+
+The CREATE2 factory is a simple contract that:
+1. Takes a salt (32 bytes) + init code as calldata
+2. Deploys the init code using CREATE2 with the provided salt
+3. Returns the deployed address
+
+This enables deterministic addresses across all chains - the same salt + init code = same address.
+
+However, this should not be a blocker for Rootstock - a different set of addresses is acceptable.
+
+#### Reference
+
+- [EIP-2470: Singleton Factory](https://eips.ethereum.org/EIPS/eip-2470)
+- [Deterministic Deployment Proxy](https://github.com/Arachnid/deterministic-deployment-proxy)
+
+---
+
 ### Requirement 1: Limit Deployment Gas to 4M per Transaction
 
 #### Current State
@@ -319,34 +383,76 @@ Each component needs to pass the flag through:
 
 **Estimated changes:** ~150 lines across txmgr, ~30 lines per component
 
-#### Testing Strategy
+**Step 5: op-deployer Changes (COMPLETED)**
+
+The `op-deployer` tool creates its own `txmgr.Config` directly in code and doesn't use CLI flags. Two files were modified to auto-detect pre-EIP-1559 chains:
+
+File: `op-deployer/pkg/deployer/broadcaster/gas_estimator.go`
+- Added check for `chainHead.BaseFee == nil` to detect pre-EIP-1559 chains
+- Falls back to `SuggestGasPrice()` or a default gas price (60 Mwei) for legacy chains
+- Returns the gas price for both tip and baseFee fields (legacy txs combine them)
+
+File: `op-deployer/pkg/deployer/broadcaster/keyed.go`
+- Auto-detects pre-EIP-1559 chains by checking if `BaseFee` is nil in the latest block header
+- Sets `UseLegacyTx: true` in the txmgr config when deploying to non-EIP-1559 chains like RSK
+
+This allows `op-deployer apply` to work with RSKj without any CLI flags - it auto-detects and uses legacy transactions.
+
+**Additional RSKj Compatibility Fixes in txmgr:**
+
+File: `op-service/txmgr/txmgr.go`
+- Added handling for RSKj's "transaction wasn't mined" error (treats as pending, not failed)
+- Added handling for RSKj's "pending transaction with same hash already exists" error (treats as already known)
+- Added `LegacyTx` case in nonce assignment switch statement
+
+File: `op-service/txmgr/send_state.go`
+- Removed early-abort on first "nonce too low" when `successfulPublishCount == 0`
+- This prevents false aborts when RSKj confirms transactions faster than the txmgr can track
+
+File: `op-deployer/pkg/deployer/broadcaster/keyed.go`
+- Increased `SafeAbortNonceTooLowCount` from 3 to 10 for RSKj compatibility
+
+File: `op-chain-ops/script/forking/rpc.go`
+- Fixed `eth_getCode` handling for RSKj (returns `null` instead of `"0x"` for empty code)
+
+#### Deployment Gas Cost Summary (RSKj Regtest)
+
+The following table shows the 10 highest gas cost transactions during `op-deployer apply` on RSKj:
+NOTE: this is without phased deployment!
+
+| Rank | Gas Limit | Approx Gas Cost (@ 2 Gwei) | Stage | Description |
+|------|-----------|---------------------------|-------|-------------|
+| 1 | 9,935,974 | 0.0199 RBTC | deploy-opchain | DeployOPChain script (all proxies + initialization) |
+| 2 | 6,326,692 | 0.0127 RBTC | deploy-implementations | L1CrossDomainMessengerImpl |
+| 3 | 6,279,564 | 0.0126 RBTC | deploy-implementations | DisputeGameFactoryImpl |
+| 4 | 6,156,195 | 0.0123 RBTC | deploy-implementations | AnchorStateRegistryImpl |
+| 5 | 6,024,331 | 0.0120 RBTC | deploy-implementations | PermissionedDisputeGameV2Impl |
+| 6 | 5,640,015 | 0.0113 RBTC | deploy-implementations | L1StandardBridgeImpl |
+| 7 | 5,363,714 | 0.0107 RBTC | deploy-implementations | OptimismPortalImpl |
+| 8 | 5,046,818 | 0.0101 RBTC | deploy-implementations | FaultDisputeGameV2Impl |
+| 9 | 4,161,296 | 0.0083 RBTC | deploy-implementations | MipsImpl |
+| 10 | 3,641,396 | 0.0073 RBTC | deploy-implementations | SystemConfigImpl |
+
+**Total Deployment Summary:**
+- Total transactions: ~37 (across 3 stages)
+- Estimated total gas: ~85M gas
+- Gas prices used: 2 Gwei base, 6.4 Gwei on retries (27 txs @ 2 Gwei, 10 txs @ 6.4 Gwei - starting values on op-stack are set for Ethereum, not rsk)
+- Estimated total cost: ~0.17-0.27 RBTC (depending on retry frequency)
+- RSK mainnet comparison: ~0.0022 RBTC at 0.026 Gwei (mainnet minimum)
+- Deployment time: ~3 minutes on RSKj regtest (automine mode)
+
+
+### Phased Deployment
+For phased deployment (lower block gas limit) use the flag
 
 ```bash
-# Run Anvil with Berlin hardfork (pre-EIP-1559) to reject EIP-1559 txs
-anvil --hardfork berlin --gas-limit 6500000
-
-# Or use Cancun but verify transaction types
-python3 rollup/scripts/verify_tx_types.py --expected-type 0
+op-deployer apply \
+  --workdir .deployer \
+  --l1-rpc-url http://localhost:8545 \
+  --private-key <key> \
+  --phased-deployment  # Required for RSK mainnet's 6.8M gas limit
 ```
 
----
-
-### Testing Configuration
-
-```bash
-# Anvil configuration for testing both restrictions
-anvil \
-  --hardfork berlin \          # Pre-EIP-1559, rejects Type 2 txs
-  --gas-limit 6500000 \         # 6.5M block limit
-  --block-time 15 \
-  --mnemonic-seed-unsafe 2
-
-# Or for Cancun with manual verification
-anvil \
-  --hardfork cancun \
-  --gas-limit 6500000 \
-  --block-time 15 \
-  --mnemonic-seed-unsafe 2
 
 # Run batcher with legacy mode
 OP_BATCHER_TXMGR_USE_LEGACY_TX=true ./scripts/start-batcher.sh
@@ -917,13 +1023,127 @@ EOF
 
 ---
 
-### Requirement 3: L1 Block Format Compatibility ⏳ PENDING
+### Requirement 3: L1 Block Format Compatibility 🔄 IN PROGRESS
 
-**Status:** Not yet implemented
+**Status:** RSK-specific block verification integrated, testing required
 
 #### Problem Statement
 
 The op-node reads L1 blocks and block headers to derive the L2 chain. Currently, it expects L1 data in Ethereum mainnet format (post-Cancun). If the L1 chain uses a different block format (e.g., pre-Cancun, pre-London, or a custom format), op-node may fail to parse the data correctly.
+
+RSK has significant differences from Ethereum:
+- **Different block header fields**: paidFees, minimumGasPrice, ummRoot, txExecutionSublistsEdges, Bitcoin merged mining fields
+- **Different block hash computation**: RSKIP-92, RSKIP-351 encoding rules
+- **Different trie structure**: Binary trie instead of hexary MPT
+- **Pre-merge chain**: Uses PoW, has difficulty, nonce, uncles
+
+#### RSK Integration Work Completed
+
+**1. gorsk Library Integration**
+
+Added the `gorsk` library as a submodule for RSK-specific protocol operations:
+
+```
+op-service/rsk/gorsk/           # RSK protocol library
+├── rskblocks/                  # Block hash computation, transaction/receipt encoding
+│   ├── block_header_hash_helper.go  # RSKIP-92, RSKIP-351 hash rules
+│   ├── block_hashes_helper.go       # Binary trie root computation
+│   ├── transaction.go               # RSK transaction encoding
+│   └── receipt.go                   # RSK receipt encoding
+└── rsktrie/                    # Binary trie implementation
+    ├── trie.go                 # RSK binary trie (vs Ethereum hexary MPT)
+    └── proof_verifier.go       # Merkle proof verification
+```
+
+**2. RSK Types Package (`op-service/rsk/`)**
+
+Created new package with RSK-specific types and utilities:
+
+| File | Purpose |
+|------|---------|
+| `types.go` | `RSKRPCHeader` with RSK-specific fields, `RSKNetworkConfig` for RSKIP activation heights |
+| `block_hash.go` | `ComputeRSKBlockHash()` - wraps gorsk for RSK block hash computation |
+| `trie.go` | `VerifyRSKTxRoot()`, `VerifyRSKReceiptsRoot()` - binary trie verification |
+
+**RSKRPCHeader fields:**
+```go
+type RSKRPCHeader struct {
+    // Standard Ethereum fields...
+
+    // RSK-specific fields
+    PaidFees                    *hexutil.Big     // Total fees paid in block
+    MinimumGasPrice             *hexutil.Big     // Minimum gas price
+    UncleCount                  hexutil.Uint64   // Uncle count
+    UmmRoot                     *common.Hash     // RSKIP-UMM unified mining merkle root
+    TxExecutionSublistsEdges    []hexutil.Uint64 // RSKIP-144 parallel tx execution
+
+    // Bitcoin merged mining fields
+    BitcoinMergedMiningHeader              hexutil.Bytes
+    BitcoinMergedMiningMerkleProof         hexutil.Bytes
+    BitcoinMergedMiningCoinbaseTransaction hexutil.Bytes
+}
+```
+
+**RSK Network Configurations:**
+```go
+// Chain ID detection
+IsRSKChain(chainID) // Returns true for 30 (mainnet), 31 (testnet), 33 (regtest)
+
+// Network-specific RSKIP activation heights
+MainnetConfig()   // RSKIP-351 at block 5468000, UMM at 4598500
+TestnetConfig()   // All RSKIPs active from genesis
+RegtestConfig()   // All RSKIPs active from genesis
+```
+
+**3. Integration into op-service/sources/types.go**
+
+Modified `RPCHeader` and `RPCBlock` to support RSK:
+
+| Change | Description |
+|--------|-------------|
+| Added RSK fields to `RPCHeader` | Optional fields parsed from RSK RPC responses |
+| Added `isRSK()` method | Detects RSK by presence of `minimumGasPrice` field |
+| Modified `checkPostMerge()` | Skips post-merge validation for RSK (pre-merge chain) |
+| Modified `computeBlockHash()` | Uses `rsk.ComputeRSKBlockHash()` for RSK chains |
+| Added `toRSKRPCHeader()` | Converts RPCHeader to RSKRPCHeader for RSK operations |
+| Modified `Verify()` | Uses `rsk.VerifyRSKTxRoot()` for RSK binary trie verification |
+
+**Key code changes in `types.go`:**
+
+```go
+// RSK detection
+func (hdr *RPCHeader) isRSK() bool {
+    return hdr.MinimumGasPrice != nil
+}
+
+// RSK block hash computation
+func (hdr *RPCHeader) computeBlockHash() common.Hash {
+    if hdr.isRSK() {
+        rskHeader := hdr.toRSKRPCHeader()
+        config := rsk.DefaultRegtestConfig()
+        hash, _ := rsk.ComputeRSKBlockHash(rskHeader, config)
+        return hash
+    }
+    // Standard Ethereum hash computation...
+}
+
+// RSK transaction root verification
+func (block *RPCBlock) Verify() error {
+    // ...
+    if block.isRSK() {
+        return rsk.VerifyRSKTxRoot(block.TxHash, block.Transactions)
+    }
+    // Standard Ethereum verification...
+}
+```
+
+#### Build Verification
+
+All packages compile successfully:
+```bash
+go build ./op-service/rsk/...      # RSK types and utilities
+go build ./op-service/sources/...  # Modified sources with RSK support
+```
 
 #### L1 Block Header Fields by Hardfork
 
@@ -1018,11 +1238,245 @@ The op-node reads L1 blocks and block headers to derive the L2 chain. Currently,
 | `op-node/sources/l1_beacon_client.go` | Beacon chain client |
 | `op-service/eth/types.go` | Block/header type definitions |
 
-#### Next Steps
+#### Remaining Work
 
-1. Run op-node against Anvil in `--hardfork berlin` mode and observe errors
-2. Identify which fields cause parsing failures
-3. Trace through the code to understand the parsing logic
-4. Implement graceful handling for missing fields
-5. Add configuration options for L1 compatibility mode
+**Testing Required:**
+1. Run op-node against RSKj regtest to verify block parsing works end-to-end
+2. Verify block hash computation matches RSKj's reported hashes
+3. Verify transaction root verification passes for RSK blocks
+4. Test with blocks at different RSKIP activation heights (mainnet)
+
+**Potential Additional Changes:**
+1. **Receipt root verification** - Add RSK receipt root verification when fetching receipts
+2. **Network config detection** - Auto-detect RSK network config from chain ID instead of defaulting to regtest
+3. **EthClient integration** - May need RSK-specific handling in `eth_client.go` for block fetching
+4. **Beacon client** - RSK doesn't have a beacon chain; ensure op-node works without it (`--l1.beacon.ignore=true`)
+
+**Files Modified for RSK Support:**
+
+| File | Changes |
+|------|---------|
+| `op-service/rsk/types.go` | New: RSKRPCHeader, RSKNetworkConfig, chain detection |
+| `op-service/rsk/block_hash.go` | New: RSK block hash computation wrapper |
+| `op-service/rsk/trie.go` | New: RSK binary trie verification (tx and receipt roots) |
+| `op-service/rsk/gorsk/` | New: gorsk submodule for RSK protocol |
+| `op-service/sources/types.go` | Modified: RSK detection, hash computation, tx root verification |
+| `op-service/sources/receipts.go` | Modified: Added RSK-aware receipt validation |
+| `op-service/sources/receipts_rpc.go` | Modified: Added RPCKindRSK provider, RSK receipt verification |
+| `rollup/scripts/test_rsk_integration.go` | New: Test script for RSKj validation |
+
+**New RPC Provider Kind:**
+
+Added `RPCKindRSK` ("rsk") to `op-service/sources/receipts_rpc.go` for RSK-specific receipt verification. When using RSK L1, configure op-node with `--l1.rpc-kind=rsk`.
+
+#### Testing Against RSKj
+
+**Quick Test Script:**
+
+A test script is provided to validate the RSK integration:
+
+```bash
+# Run the RSK integration test against RSKj
+cd /Users/shreeroot/rsk/projects/optimism
+go run ./rollup/scripts/test_rsk_integration.go --rpc-url http://localhost:4444
+
+# The script tests:
+# 1. Chain ID detection (30=mainnet, 31=testnet, 33=regtest)
+# 2. Block info fetching with RSK verification
+# 3. Block + transaction fetching with tx root verification
+# 4. RSK-specific field detection (minimumGasPrice, paidFees)
+```
+
+**Full op-node Testing:**
+
+```bash
+# 1. Start RSKj regtest
+cd /path/to/rskj
+./gradlew run -Prsk.conf.file=rsk-regtest.conf
+
+# 2. Fund accounts and deploy contracts (already done)
+# See earlier sections for op-deployer apply
+
+# 3. Start op-node with RSK L1
+op-node --l1=http://localhost:4444 \
+        --l1.rpc-kind=rsk \           # Use RSK provider for receipt verification
+        --l1.beacon.ignore=true \     # RSK has no beacon chain
+        --l1.trustrpc=true \          # Start with trust mode for initial testing
+        ...
+
+# 4. Once basic operation is verified, enable block verification:
+op-node --l1=http://localhost:4444 \
+        --l1.rpc-kind=rsk \
+        --l1.beacon.ignore=true \
+        --l1.trustrpc=false \         # Enable hash and trie verification
+        ...
+```
+
+#### Original Investigation Areas (Pre-RSK Integration)
+
+The following areas were identified before RSK integration was implemented:
+
+---
+
+## Implementation Progress (February 2026)
+
+### Successfully Completed
+
+The Optimism L2 rollup has been successfully deployed and is running on RSK L1 (regtest). The following milestones have been achieved:
+
+1. **Contract Deployment**: All Optimism L1 contracts deployed on RSK regtest via `op-deployer`
+2. **L2 Genesis**: Generated and initialized op-geth with RSK-derived genesis
+3. **op-node Running**: Sequencer producing L2 blocks, deriving from RSK L1
+4. **L1 → L2 Bridge**: Successfully bridged 1 RBTC from RSK L1 to L2
+5. **L2 Transactions**: Deployed ERC20 token contract on L2
+
+### Key Fixes Applied
+
+#### 1. RSK Block Hash Computation (`op-service/rsk/` and `gorsk` submodule)
+
+RSK uses different block hash computation rules than Ethereum:
+- **RSKIP-92**: Merged mining hash field
+- **RSKIP-144**: Parallel transaction execution edges
+- **RSKIP-351**: Header compression (V1 headers with extension data)
+- **RSKIP-535**: Base event field (V2 headers)
+
+The `gorsk` library handles all RSK-specific block encoding and hash computation.
+
+#### 2. Transaction Hash Preservation (`op-service/sources/types.go`)
+
+**Problem**: go-ethereum's `ethclient` recomputes transaction hashes using Ethereum's RLP encoding, but RSK transactions encode differently, resulting in wrong hashes.
+
+**Fix**: Added custom JSON unmarshaler for `RPCBlock` that preserves original transaction hashes from the RPC response:
+
+```go
+type RPCBlock struct {
+    // ... existing fields ...
+    OriginalTxHashes []common.Hash `json:"-"` // Preserved from RPC
+}
+
+func (block *RPCBlock) UnmarshalJSON(data []byte) error {
+    // Custom unmarshal that captures original tx hashes
+}
+
+func (block *RPCBlock) GetTxHashes() []common.Hash {
+    if block.isRSK() {
+        return block.OriginalTxHashes  // Use RPC hashes for RSK
+    }
+    // Compute hashes for Ethereum
+}
+```
+
+#### 3. Receipt Field Population (`op-service/sources/receipts.go`)
+
+**Problem**: RSKj doesn't populate `BlockNumber` and `BlockHash` fields in receipt responses.
+
+**Fix**: Populate missing fields from block context:
+
+```go
+if r.BlockNumber == nil {
+    r.BlockNumber = new(big.Int).SetUint64(block.Number)
+}
+if r.BlockHash == emptyHash {
+    r.BlockHash = block.Hash
+}
+```
+
+#### 4. Pre-EIP-1559 BaseFee Handling (`op-node/rollup/derive/l1_block_info.go`)
+
+**Problem**: RSK is pre-EIP-1559, so `BaseFee` is nil, causing panic in L1BlockInfo encoding.
+
+**Fix**: Default to zero if nil:
+
+```go
+baseFee := info.BaseFee
+if baseFee == nil {
+    baseFee = big.NewInt(0)
+}
+```
+
+#### 5. RSKj eth_getProof Limitation (`op-service/sources/eth_client.go`)
+
+**Problem**: RSKj's `eth_getProof` only supports block numbers, not block hashes.
+
+**Fix**: Convert block hash to block number for RSK when calling `eth_getProof`.
+
+#### 6. op-deployer Transaction Timeouts (`op-deployer/pkg/deployer/broadcaster/keyed.go`)
+
+**Problem**: RSKj has ~30s block times, causing transaction timeouts and nonce issues.
+
+**Fix**: Increased timeouts and switched to sequential transaction sending:
+- `TxSendTimeout`: 10m
+- `TxNotInMempoolTimeout`: 10m
+- Sequential transaction broadcasting instead of parallel
+
+### Current Limitations
+
+#### TrustRPC Mode Required
+
+**Status**: Currently running with `--l1.trustrpc=true`
+
+**Reason**: RSK uses a binary trie for storage proofs, while op-node expects Ethereum's hexary Merkle Patricia Trie. When `TrustRPC=false`, storage proof verification fails.
+
+**Impact**: The op-node trusts the L1 RPC for storage values without cryptographic verification. This is acceptable for development/testing but should be addressed for production.
+
+**TODO**: Implement RSK binary trie storage proof verification in `op-service/rsk/` using gorsk's `proof_verifier.go`.
+
+### Architecture Summary
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        RSK L1 (Regtest)                         │
+│                         Port 8545                               │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐ │
+│  │ OptimismPortal  │  │ L1StandardBridge│  │  SystemConfig   │ │
+│  │ 0xdfa5d328...   │  │ 0x56c9d411...   │  │ 0x...           │ │
+│  └─────────────────┘  └─────────────────┘  └─────────────────┘ │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              │ Deposits / L1 Data
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                         op-node                                  │
+│                         Port 8547                               │
+│  - Derives L2 blocks from RSK L1                                │
+│  - Uses gorsk for RSK block verification                        │
+│  - Preserves original RSK transaction hashes                    │
+│  - TrustRPC=true (storage proofs not verified)                  │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              │ Engine API
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                         op-geth                                  │
+│                    RPC Port 9545 / Auth 8551                    │
+│  - Executes L2 transactions                                     │
+│  - Stores L2 state                                              │
+│  - EVM-compatible with Optimism precompiles                     │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Files Modified
+
+#### Core RSK Integration
+- `op-service/rsk/` - RSK-specific types, block hash, trie verification
+- `op-service/rsk/gorsk/` - Submodule for RSK block encoding
+- `op-service/sources/types.go` - RPCBlock with original tx hash preservation
+- `op-service/sources/eth_client.go` - txHashesCache, eth_getProof fix
+- `op-service/sources/receipts.go` - Receipt field population
+
+#### op-node Fixes
+- `op-node/rollup/derive/l1_block_info.go` - Nil BaseFee handling
+- `op-node/sources/rpc_providers.go` - RPCKindRSK constant
+
+#### op-deployer Fixes
+- `op-deployer/pkg/deployer/broadcaster/keyed.go` - Timeout increases
+
+### Next Steps
+
+1. **Storage Proof Verification**: Implement RSK binary trie proof verification to enable `TrustRPC=false`
+2. **Batcher Integration**: Configure and run op-batcher to post L2 data to RSK L1
+3. **Proposer Integration**: Configure and run op-proposer for L2 output roots
+4. **Withdrawal Testing**: Test L2 → L1 withdrawals through the bridge
+5. **Testnet Deployment**: Deploy on RSK testnet with real network conditions
+6. **Mainnet Planning**: Security audit and mainnet deployment planning
 

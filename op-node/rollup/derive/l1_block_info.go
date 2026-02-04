@@ -218,7 +218,12 @@ func (info *L1BlockInfo) writeBinaryEcotone(w io.Writer) error {
 	if err := binary.Write(w, binary.BigEndian, info.Number); err != nil {
 		return err
 	}
-	if err := solabi.WriteUint256(w, info.BaseFee); err != nil {
+	// Handle nil BaseFee for pre-EIP-1559 chains like RSK
+	baseFee := info.BaseFee
+	if baseFee == nil {
+		baseFee = big.NewInt(0)
+	}
+	if err := solabi.WriteUint256(w, baseFee); err != nil {
 		return err
 	}
 	blobBasefee := info.BlobBaseFee

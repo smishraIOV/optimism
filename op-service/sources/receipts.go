@@ -3,8 +3,10 @@ package sources
 import (
 	"context"
 	"fmt"
+	"math/big"
 
 	"github.com/ethereum-optimism/optimism/op-service/eth"
+	"github.com/ethereum-optimism/optimism/op-service/rsk"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/trie"
@@ -21,6 +23,17 @@ type ReceiptsProvider interface {
 // Warning: contractAddress is not verified, since it is a more expensive operation for data we do not use.
 // See go-ethereum/crypto.CreateAddress to verify contract deployment address data based on sender and tx nonce.
 func validateReceipts(block eth.BlockID, receiptHash common.Hash, txHashes []common.Hash, receipts []*types.Receipt) error {
+	return validateReceiptsWithRSK(block, receiptHash, txHashes, receipts, false)
+}
+
+// validateReceiptsRSK validates receipts using RSK's binary trie instead of Ethereum's hexary MPT.
+func validateReceiptsRSK(block eth.BlockID, receiptHash common.Hash, txHashes []common.Hash, receipts []*types.Receipt) error {
+	return validateReceiptsWithRSK(block, receiptHash, txHashes, receipts, true)
+}
+
+// validateReceiptsWithRSK validates receipt contents with optional RSK trie support.
+// RSK uses a binary trie instead of Ethereum's hexary MPT for receipt root computation.
+func validateReceiptsWithRSK(block eth.BlockID, receiptHash common.Hash, txHashes []common.Hash, receipts []*types.Receipt, isRSK bool) error {
 	if len(receipts) != len(txHashes) {
 		return fmt.Errorf("got %d receipts but expected %d", len(receipts), len(txHashes))
 	}
@@ -40,11 +53,17 @@ func validateReceipts(block eth.BlockID, receiptHash common.Hash, txHashes []com
 		if r.TransactionIndex != uint(i) {
 			return fmt.Errorf("receipt %d has unexpected tx index %d", i, r.TransactionIndex)
 		}
+		// Some RPC providers (like RSKj) don't populate BlockNumber/BlockHash in receipts.
+		// Populate them from the block context if missing.
 		if r.BlockNumber == nil {
-			return fmt.Errorf("receipt %d has unexpected nil block number, expected %d", i, block.Number)
+			r.BlockNumber = new(big.Int).SetUint64(block.Number)
 		}
 		if r.BlockNumber.Uint64() != block.Number {
 			return fmt.Errorf("receipt %d has unexpected block number %d, expected %d", i, r.BlockNumber, block.Number)
+		}
+		emptyHash := common.Hash{}
+		if r.BlockHash == emptyHash {
+			r.BlockHash = block.Hash
 		}
 		if r.BlockHash != block.Hash {
 			return fmt.Errorf("receipt %d has unexpected block hash %s, expected %s", i, r.BlockHash, block.Hash)
@@ -59,8 +78,15 @@ func validateReceipts(block eth.BlockID, receiptHash common.Hash, txHashes []com
 			if log.TxIndex != uint(i) {
 				return fmt.Errorf("log %d has unexpected tx index %d", log.Index, log.TxIndex)
 			}
+			// RSKj may not populate log BlockHash/BlockNumber
+			if log.BlockHash == emptyHash {
+				log.BlockHash = block.Hash
+			}
 			if log.BlockHash != block.Hash {
 				return fmt.Errorf("log %d of block %s has unexpected block hash %s", log.Index, block.Hash, log.BlockHash)
+			}
+			if log.BlockNumber == 0 {
+				log.BlockNumber = block.Number
 			}
 			if log.BlockNumber != block.Number {
 				return fmt.Errorf("log %d of block %d has unexpected block number %d", log.Index, block.Number, log.BlockNumber)
@@ -82,10 +108,17 @@ func validateReceipts(block eth.BlockID, receiptHash common.Hash, txHashes []com
 
 	// Sanity-check: external L1-RPC sources are notorious for not returning all receipts,
 	// or returning them out-of-order. Verify the receipts against the expected receipt-hash.
-	hasher := trie.NewStackTrie(nil)
-	computed := types.DeriveSha(types.Receipts(receipts), hasher)
-	if receiptHash != computed {
-		return fmt.Errorf("failed to fetch list of receipts: expected receipt root %s but computed %s from retrieved receipts", receiptHash, computed)
+	if isRSK {
+		// RSK uses a binary trie instead of Ethereum's hexary MPT
+		if err := rsk.VerifyRSKReceiptsRoot(receiptHash, receipts); err != nil {
+			return fmt.Errorf("failed to verify RSK receipts: %w", err)
+		}
+	} else {
+		hasher := trie.NewStackTrie(nil)
+		computed := types.DeriveSha(types.Receipts(receipts), hasher)
+		if receiptHash != computed {
+			return fmt.Errorf("failed to fetch list of receipts: expected receipt root %s but computed %s from retrieved receipts", receiptHash, computed)
+		}
 	}
 	return nil
 }

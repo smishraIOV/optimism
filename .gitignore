@@ -52,6 +52,12 @@ crytic-export
 # ignore local asdf config
 .tool-versions
 
+# binary
+bin/
+
+# JWT secrets
+jwt.txt
+
 # Local rollup deployment
 rollup/op-geth/
 rollup/deployer/.deployer/state.json

@@ -43,18 +43,30 @@ type KeyedBroadcasterOpts struct {
 }
 
 func NewKeyedBroadcaster(cfg KeyedBroadcasterOpts) (*KeyedBroadcaster, error) {
+	// Check if chain supports EIP-1559 by checking if BaseFee is present
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	head, err := cfg.Client.HeaderByNumber(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get latest block header: %w", err)
+	}
+	// Auto-detect pre-EIP-1559 chains (like RSKj) by checking if BaseFee is nil.
+	// These chains require legacy (Type 0) transactions instead of EIP-1559 (Type 2).
+	useLegacyTx := head.BaseFee == nil
+
 	mgrCfg := &txmgr.Config{
 		Backend:                   cfg.Client,
 		ChainID:                   cfg.ChainID,
-		TxSendTimeout:             5 * time.Minute,
-		TxNotInMempoolTimeout:     time.Minute,
-		NetworkTimeout:            10 * time.Second,
-		ReceiptQueryInterval:      time.Second,
+		TxSendTimeout:             10 * time.Minute, // Increased for RSKj slow block times (~30s)
+		TxNotInMempoolTimeout:     3 * time.Minute,  // Increased for RSKj
+		NetworkTimeout:            30 * time.Second, // Increased for RSKj
+		ReceiptQueryInterval:      3 * time.Second,  // Increased for RSKj
 		NumConfirmations:          1,
-		SafeAbortNonceTooLowCount: 3,
+		SafeAbortNonceTooLowCount: 20, // Increased for RSKj compatibility - slow block times cause race conditions
 		Signer:                    cfg.Signer,
 		From:                      cfg.From,
 		GasPriceEstimatorFn:       DeployerGasPriceEstimator,
+		UseLegacyTx:               useLegacyTx,
 	}
 
 	minTipCap, err := eth.GweiToWei(1.0)
@@ -66,8 +78,8 @@ func NewKeyedBroadcaster(cfg KeyedBroadcasterOpts) (*KeyedBroadcaster, error) {
 		panic(err)
 	}
 
-	mgrCfg.RebroadcastInterval.Store(int64(12 * time.Second))
-	mgrCfg.ResubmissionTimeout.Store(int64(48 * time.Second))
+	mgrCfg.RebroadcastInterval.Store(int64(30 * time.Second)) // Increased for RSKj (~30s block time)
+	mgrCfg.ResubmissionTimeout.Store(int64(90 * time.Second)) // Increased for RSKj
 	mgrCfg.FeeLimitMultiplier.Store(5)
 	mgrCfg.FeeLimitThreshold.Store(big.NewInt(100))
 	mgrCfg.MinTipCap.Store(minTipCap)
@@ -111,28 +123,29 @@ func (t *KeyedBroadcaster) Broadcast(ctx context.Context) ([]BroadcastResult, er
 	}
 
 	results := make([]BroadcastResult, len(bcasts))
-	futures := make([]<-chan txmgr.SendResponse, len(bcasts))
-	ids := make([]common.Hash, len(bcasts))
 
 	latestBlock, err := t.client.BlockByNumber(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get latest block: %w", err)
 	}
 
-	for i, bcast := range bcasts {
-		futures[i], ids[i] = t.broadcast(ctx, bcast, latestBlock.GasLimit())
-		t.lgr.Info(
-			"transaction broadcasted",
-			"id", ids[i],
-			"nonce", bcast.Nonce,
-		)
-	}
-
+	// RSKj compatibility: Send transactions sequentially to avoid mempool conflicts.
+	// RSKj has slower block times (~30s) and stricter mempool handling than Ethereum.
+	// Parallel tx submission causes "pending transaction with same hash" errors.
 	var txErr *multierror.Error
-	var completed int
-	for i, fut := range futures {
+	for i, bcast := range bcasts {
+		id := bcast.ID()
+		t.lgr.Info(
+			"transaction broadcasting",
+			"id", id,
+			"nonce", bcast.Nonce,
+			"progress", fmt.Sprintf("%d/%d", i+1, len(bcasts)),
+		)
+
+		// Send and wait for this transaction before sending the next
+		fut, _ := t.broadcast(ctx, bcast, latestBlock.GasLimit())
 		bcastRes := <-fut
-		completed++
+
 		outRes := BroadcastResult{
 			Broadcast: bcasts[i],
 		}
@@ -147,8 +160,8 @@ func (t *KeyedBroadcaster) Broadcast(ctx context.Context) ([]BroadcastResult, er
 				outRes.Err = failErr
 				t.lgr.Error(
 					"transaction failed on chain",
-					"id", ids[i],
-					"completed", completed,
+					"id", id,
+					"completed", i+1,
 					"total", len(bcasts),
 					"hash", outRes.Receipt.TxHash.String(),
 					"nonce", outRes.Broadcast.Nonce,
@@ -156,8 +169,8 @@ func (t *KeyedBroadcaster) Broadcast(ctx context.Context) ([]BroadcastResult, er
 			} else {
 				t.lgr.Info(
 					"transaction confirmed",
-					"id", ids[i],
-					"completed", completed,
+					"id", id,
+					"completed", i+1,
 					"total", len(bcasts),
 					"hash", outRes.Receipt.TxHash.String(),
 					"nonce", outRes.Broadcast.Nonce,
@@ -169,8 +182,8 @@ func (t *KeyedBroadcaster) Broadcast(ctx context.Context) ([]BroadcastResult, er
 			outRes.Err = bcastRes.Err
 			t.lgr.Error(
 				"transaction failed",
-				"id", ids[i],
-				"completed", completed,
+				"id", id,
+				"completed", i+1,
 				"total", len(bcasts),
 				"err", bcastRes.Err,
 			)

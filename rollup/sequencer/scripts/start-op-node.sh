@@ -3,10 +3,12 @@ set -e
 cd "$(dirname "$0")/.."
 source .env
 
-OP_NODE_BIN="../../op-node/bin/op-node"
+OP_NODE_BIN="../../bin/op-node"
 
 $OP_NODE_BIN \
   --l1=$L1_RPC_URL \
+  --l1.rpckind=rsk \
+  --l1.trustrpc=true \
   --l1.beacon.ignore=true \
   --l2=http://localhost:$OP_GETH_AUTH_PORT \
   --l2.jwt-secret=$JWT_SECRET \

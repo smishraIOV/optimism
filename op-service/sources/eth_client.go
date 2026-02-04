@@ -129,11 +129,18 @@ type EthClient struct {
 
 	mustBePostMerge bool
 
+	// providerKind indicates the type of RPC provider (e.g., RSK, Alchemy, etc.)
+	providerKind RPCProviderKind
+
 	log log.Logger
 
 	// cache transactions in bundles per block hash
 	// common.Hash -> types.Transactions
 	transactionsCache *caching.LRUCache[common.Hash, types.Transactions]
+
+	// cache original transaction hashes per block hash (for RSK which has different tx hash computation)
+	// common.Hash -> []common.Hash
+	txHashesCache *caching.LRUCache[common.Hash, []common.Hash]
 
 	// cache block headers of blocks by hash
 	// common.Hash -> *HeaderInfo
@@ -167,8 +174,10 @@ func NewEthClient(client client.RPC, log log.Logger, metrics caching.Metrics, co
 		recProvider:       recProvider,
 		trustRPC:          config.TrustRPC,
 		mustBePostMerge:   config.MustBePostMerge,
+		providerKind:      config.RPCProviderKind,
 		log:               log,
 		transactionsCache: caching.NewLRUCache[common.Hash, types.Transactions](metrics, "txs", config.TransactionsCacheSize),
+		txHashesCache:     caching.NewLRUCache[common.Hash, []common.Hash](metrics, "txhashes", config.TransactionsCacheSize),
 		headersCache:      caching.NewLRUCache[common.Hash, eth.BlockInfo](metrics, "headers", config.HeadersCacheSize),
 		payloadsCache:     caching.NewLRUCache[common.Hash, *eth.ExecutionPayloadEnvelope](metrics, "payloads", config.PayloadsCacheSize),
 		blockRefsCache:    caching.NewLRUCache[common.Hash, eth.L1BlockRef](metrics, "blockrefs", config.BlockRefsCacheSize),
@@ -250,6 +259,8 @@ func (s *EthClient) blockCall(ctx context.Context, method string, id rpcBlockID)
 	}
 	s.headersCache.Add(info.Hash(), info)
 	s.transactionsCache.Add(info.Hash(), txs)
+	// Cache original tx hashes for RSK (where go-ethereum computes wrong hashes)
+	s.txHashesCache.Add(info.Hash(), block.GetTxHashes())
 	return info, txs, nil
 }
 
@@ -348,12 +359,17 @@ func (s *EthClient) FetchReceiptsByNumber(ctx context.Context, number uint64) (e
 // It verifies the receipt hash in the block header against the receipt hash of the fetched receipts
 // to ensure that the execution engine did not fail to return any receipts.
 func (s *EthClient) FetchReceipts(ctx context.Context, blockHash common.Hash) (eth.BlockInfo, types.Receipts, error) {
-	info, txs, err := s.InfoAndTxsByHash(ctx, blockHash)
+	info, _, err := s.InfoAndTxsByHash(ctx, blockHash)
 	if err != nil {
 		return nil, nil, fmt.Errorf("querying block: %w", err)
 	}
 
-	txHashes, _ := eth.TransactionsToHashes(txs), eth.ToBlockID(info)
+	// Use cached original tx hashes (important for RSK where go-ethereum computes wrong hashes)
+	txHashes, ok := s.txHashesCache.Get(blockHash)
+	if !ok {
+		return nil, nil, fmt.Errorf("tx hashes not in cache for block %s", blockHash)
+	}
+
 	receipts, err := s.recProvider.FetchReceipts(ctx, info, txHashes)
 	if err != nil {
 		return nil, nil, err
@@ -430,7 +446,16 @@ func (s *EthClient) ReadStorageAt(ctx context.Context, address common.Address, s
 		return common.Hash{}, fmt.Errorf("failed to retrieve state root of block %s: %w", blockHash, err)
 	}
 
-	result, err := s.GetProof(ctx, address, []common.Hash{storageSlot}, blockHash.String())
+	// RSKj's eth_getProof doesn't support block hashes, only block numbers.
+	// Convert hash to number for RSK chains.
+	var blockTag string
+	if s.providerKind == RPCKindRSK {
+		blockTag = fmt.Sprintf("0x%x", block.NumberU64())
+	} else {
+		blockTag = blockHash.String()
+	}
+
+	result, err := s.GetProof(ctx, address, []common.Hash{storageSlot}, blockTag)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("failed to fetch proof of storage slot %s at block %s: %w", storageSlot, blockHash, err)
 	}

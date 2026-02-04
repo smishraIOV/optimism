@@ -1,6 +1,7 @@
 package sources
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/ethereum-optimism/optimism/op-core/predeploys"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
+	"github.com/ethereum-optimism/optimism/op-service/rsk"
 )
 
 // Note: these types are used, instead of the geth types, to enable:
@@ -67,11 +69,54 @@ type RPCHeader struct {
 
 	// untrusted info included by RPC, may have to be checked
 	Hash common.Hash `json:"hash"`
+
+	// RSK-specific fields (present when connected to RSK L1)
+	// These fields are used to detect RSK chains and compute RSK-specific block hashes.
+	// See: https://github.com/rsksmart/RSKIPs
+
+	// PaidFees is the total fees paid in this block (RSK-specific)
+	PaidFees *hexutil.Big `json:"paidFees,omitempty"`
+
+	// MinimumGasPrice is the minimum gas price for transactions (RSK-specific)
+	MinimumGasPrice *hexutil.Big `json:"minimumGasPrice,omitempty"`
+
+	// UncleCount is the number of uncles (RSK uses this differently than Ethereum)
+	UncleCount *hexutil.Uint64 `json:"uncleCount,omitempty"`
+
+	// UmmRoot is the Unified Mining Merkle root (RSKIP-UMM)
+	UmmRoot *common.Hash `json:"ummRoot,omitempty"`
+
+	// TxExecutionSublistsEdges for parallel transaction execution (RSKIP-144)
+	// Note: RSKj returns this as "rskPteEdges" in JSON-RPC responses
+	TxExecutionSublistsEdges []hexutil.Uint64 `json:"txExecutionSublistsEdges,omitempty"`
+
+	// RskPteEdges is the RSKj field name for TxExecutionSublistsEdges
+	RskPteEdges []hexutil.Uint64 `json:"rskPteEdges,omitempty"`
+
+	// BaseEvent is for V2 headers (RSKIP-535) - pointer to handle null from RPC
+	BaseEvent *hexutil.Bytes `json:"baseEvent,omitempty"`
+
+	// Bitcoin merged mining fields
+	BitcoinMergedMiningHeader              hexutil.Bytes `json:"bitcoinMergedMiningHeader,omitempty"`
+	BitcoinMergedMiningMerkleProof         hexutil.Bytes `json:"bitcoinMergedMiningMerkleProof,omitempty"`
+	BitcoinMergedMiningCoinbaseTransaction hexutil.Bytes `json:"bitcoinMergedMiningCoinbaseTransaction,omitempty"`
+}
+
+// isRSK returns true if this header appears to be from an RSK chain.
+// RSK headers have specific fields like PaidFees and MinimumGasPrice that Ethereum doesn't have.
+func (hdr *RPCHeader) isRSK() bool {
+	// RSK always includes minimumGasPrice in block headers
+	return hdr.MinimumGasPrice != nil
 }
 
 // checkPostMerge checks that the block header meets all criteria to be a valid ExecutionPayloadHeader,
 // see EIP-3675 (block header changes) and EIP-4399 (mixHash usage for prev-randao)
 func (hdr *RPCHeader) checkPostMerge() error {
+	// RSK is a pre-merge style chain with PoW characteristics - skip post-merge checks
+	if hdr.isRSK() {
+		return nil
+	}
+
 	// TODO: the genesis block has a non-zero difficulty number value.
 	// Either this block needs to change, or we special case it. This is not valid w.r.t. EIP-3675.
 	if hdr.Number != 0 && (*big.Int)(&hdr.Difficulty).Cmp(common.Big0) != 0 {
@@ -93,8 +138,94 @@ func (hdr *RPCHeader) checkPostMerge() error {
 }
 
 func (hdr *RPCHeader) computeBlockHash() common.Hash {
+	// RSK uses different block hash computation rules (RSKIP-92, RSKIP-351)
+	if hdr.isRSK() {
+		rskHeader := hdr.toRSKRPCHeader()
+		// Determine RSK network config based on block characteristics.
+		// For blocks at height > 6M, all RSKIPs are active on all RSK networks.
+		// For lower blocks, we use the regtest config which has all RSKIPs active from genesis.
+		// This works correctly for:
+		// - Regtest: all RSKIPs active from genesis
+		// - Testnet: all RSKIPs typically active from genesis
+		// - Mainnet: for current blocks (> 6M), all RSKIPs are active
+		// Note: For historical mainnet blocks before RSKIP activations, the hash computation
+		// may be incorrect, but op-node typically only processes recent blocks.
+		config := hdr.getRSKNetworkConfig()
+		hash, err := rsk.ComputeRSKBlockHash(rskHeader, config)
+		if err != nil {
+			// Fall back to standard computation if RSK hash fails
+			// This shouldn't happen but provides graceful degradation
+			gethHeader := hdr.CreateGethHeader()
+			return gethHeader.Hash()
+		}
+		return hash
+	}
+
 	gethHeader := hdr.CreateGethHeader()
 	return gethHeader.Hash()
+}
+
+// getRSKNetworkConfig determines the RSK network configuration based on block characteristics.
+// TODO: Ideally we should pass chain ID from EthClient to get accurate network config.
+// For now, we use regtest config which has all RSKIPs active (V2 headers).
+// This works correctly for regtest. For mainnet/testnet, the chain ID should be passed
+// through the verification pipeline for accurate RSKIP activation detection.
+func (hdr *RPCHeader) getRSKNetworkConfig() rsk.RSKNetworkConfig {
+	// Default to regtest config - all RSKIPs active, V2 headers, 4-byte gasLimit
+	// This is the safest default for local development and testing.
+	//
+	// For production use with mainnet/testnet, the network config should be
+	// determined from chain ID rather than inferred from header fields.
+	return rsk.DefaultRegtestConfig()
+}
+
+// toRSKRPCHeader converts this RPCHeader to an RSKRPCHeader for RSK-specific operations.
+func (hdr *RPCHeader) toRSKRPCHeader() *rsk.RSKRPCHeader {
+	rskHdr := &rsk.RSKRPCHeader{
+		ParentHash:  hdr.ParentHash,
+		UncleHash:   hdr.UncleHash,
+		Coinbase:    hdr.Coinbase,
+		Root:        hdr.Root,
+		TxHash:      hdr.TxHash,
+		ReceiptHash: hdr.ReceiptHash,
+		Bloom:       hdr.Bloom,
+		Difficulty:  hdr.Difficulty,
+		Number:      hdr.Number,
+		GasLimit:    hdr.GasLimit,
+		GasUsed:     hdr.GasUsed,
+		Time:        hdr.Time,
+		Extra:       hdr.Extra,
+		MixDigest:   hdr.MixDigest,
+		Nonce:       hdr.Nonce,
+		Hash:        hdr.Hash,
+
+		// RSK-specific fields
+		PaidFees:                               hdr.PaidFees,
+		MinimumGasPrice:                        hdr.MinimumGasPrice,
+		UmmRoot:                                hdr.UmmRoot,
+		BaseEvent:                              hdr.BaseEvent,
+		BitcoinMergedMiningHeader:              hdr.BitcoinMergedMiningHeader,
+		BitcoinMergedMiningMerkleProof:         hdr.BitcoinMergedMiningMerkleProof,
+		BitcoinMergedMiningCoinbaseTransaction: hdr.BitcoinMergedMiningCoinbaseTransaction,
+	}
+
+	// Handle TxExecutionSublistsEdges - RSKj uses "rskPteEdges" field name
+	if len(hdr.TxExecutionSublistsEdges) > 0 {
+		rskHdr.TxExecutionSublistsEdges = hdr.TxExecutionSublistsEdges
+	} else if len(hdr.RskPteEdges) > 0 {
+		rskHdr.TxExecutionSublistsEdges = hdr.RskPteEdges
+	} else if hdr.RskPteEdges != nil {
+		// RSKj returns empty array [] which we need to preserve (different from nil)
+		rskHdr.TxExecutionSublistsEdges = []hexutil.Uint64{}
+	}
+
+	// Handle UncleCount conversion - default to 0 if not provided
+	if hdr.UncleCount != nil {
+		rskHdr.UncleCount = *hdr.UncleCount
+	}
+	// Note: RSKj doesn't return uncleCount directly, it can be computed from uncles array
+
+	return rskHdr
 }
 
 func (hdr *RPCHeader) CreateGethHeader() *types.Header {
@@ -150,6 +281,74 @@ type RPCBlock struct {
 	RPCHeader
 	Transactions []*types.Transaction `json:"transactions"`
 	Withdrawals  *types.Withdrawals   `json:"withdrawals,omitempty"`
+
+	// OriginalTxHashes stores the transaction hashes as returned by the RPC.
+	// For RSK, go-ethereum computes wrong tx hashes due to different RLP encoding.
+	// This field preserves the original hashes for use in receipt fetching.
+	OriginalTxHashes []common.Hash `json:"-"`
+}
+
+// rpcBlockForUnmarshal is used for custom JSON unmarshaling to capture original tx hashes.
+type rpcBlockForUnmarshal struct {
+	RPCHeader
+	Transactions []rpcTxForUnmarshal `json:"transactions"`
+	Withdrawals  *types.Withdrawals  `json:"withdrawals,omitempty"`
+}
+
+// rpcTxForUnmarshal captures the original hash from RPC before go-ethereum recomputes it.
+type rpcTxForUnmarshal struct {
+	Hash common.Hash `json:"hash"`
+	*types.Transaction
+}
+
+func (tx *rpcTxForUnmarshal) UnmarshalJSON(data []byte) error {
+	// First extract just the hash
+	var hashOnly struct {
+		Hash common.Hash `json:"hash"`
+	}
+	if err := json.Unmarshal(data, &hashOnly); err != nil {
+		return err
+	}
+	tx.Hash = hashOnly.Hash
+
+	// Then unmarshal the full transaction
+	tx.Transaction = new(types.Transaction)
+	return tx.Transaction.UnmarshalJSON(data)
+}
+
+func (block *RPCBlock) UnmarshalJSON(data []byte) error {
+	var raw rpcBlockForUnmarshal
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	block.RPCHeader = raw.RPCHeader
+	block.Withdrawals = raw.Withdrawals
+
+	// Convert transactions and preserve original hashes
+	block.Transactions = make([]*types.Transaction, len(raw.Transactions))
+	block.OriginalTxHashes = make([]common.Hash, len(raw.Transactions))
+	for i, tx := range raw.Transactions {
+		block.Transactions[i] = tx.Transaction
+		block.OriginalTxHashes[i] = tx.Hash
+	}
+
+	return nil
+}
+
+// GetTxHashes returns the correct transaction hashes for this block.
+// For RSK blocks, returns the original hashes from RPC (since go-ethereum computes wrong hashes).
+// For Ethereum blocks, returns the computed hashes from the Transaction objects.
+func (block *RPCBlock) GetTxHashes() []common.Hash {
+	if block.isRSK() && len(block.OriginalTxHashes) == len(block.Transactions) {
+		return block.OriginalTxHashes
+	}
+	// Fallback to computed hashes
+	hashes := make([]common.Hash, len(block.Transactions))
+	for i, tx := range block.Transactions {
+		hashes[i] = tx.Hash()
+	}
+	return hashes
 }
 
 func (block *RPCBlock) Verify() error {
@@ -161,8 +360,21 @@ func (block *RPCBlock) Verify() error {
 			return fmt.Errorf("block tx %d is nil", i)
 		}
 	}
-	if computed := types.DeriveSha(types.Transactions(block.Transactions), trie.NewStackTrie(nil)); block.TxHash != computed {
-		return fmt.Errorf("failed to verify transactions list: computed %s but RPC said %s", computed, block.TxHash)
+
+	// RSK uses a binary trie instead of Ethereum's hexary MPT for transaction roots
+	if block.isRSK() {
+		if err := rsk.VerifyRSKTxRoot(block.TxHash, block.Transactions); err != nil {
+			return fmt.Errorf("failed to verify RSK transactions list: %w", err)
+		}
+	} else {
+		if computed := types.DeriveSha(types.Transactions(block.Transactions), trie.NewStackTrie(nil)); block.TxHash != computed {
+			return fmt.Errorf("failed to verify transactions list: computed %s but RPC said %s", computed, block.TxHash)
+		}
+	}
+
+	// RSK doesn't have withdrawals (pre-Shanghai chain) - skip withdrawal validation
+	if block.isRSK() {
+		return nil
 	}
 
 	// Withdrawals validation is different between L1 and L2.

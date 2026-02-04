@@ -2,7 +2,9 @@ package forking
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/holiman/uint256"
@@ -95,43 +97,73 @@ func (r *RPCSource) StateRoot() common.Hash {
 }
 
 func (r *RPCSource) Nonce(addr common.Address) (uint64, error) {
-	return retry.Do[uint64](r.ctx, r.maxAttempts, r.strategy, func() (uint64, error) {
+	start := time.Now()
+	log.Printf("[RPC] eth_getTransactionCount addr=%s", addr.Hex())
+	result, err := retry.Do[uint64](r.ctx, r.maxAttempts, r.strategy, func() (uint64, error) {
 		ctx, cancel := context.WithTimeout(r.ctx, r.timeout)
 		defer cancel()
 		var result hexutil.Uint64
 		err := r.client.CallContext(ctx, &result, "eth_getTransactionCount", addr, r.blockHash)
 		return uint64(result), err
 	})
+	log.Printf("[RPC] eth_getTransactionCount completed in %v, err=%v, nonce=%d", time.Since(start), err, result)
+	return result, err
 }
 
 func (r *RPCSource) Balance(addr common.Address) (*uint256.Int, error) {
-	return retry.Do[*uint256.Int](r.ctx, r.maxAttempts, r.strategy, func() (*uint256.Int, error) {
+	start := time.Now()
+	log.Printf("[RPC] eth_getBalance addr=%s", addr.Hex())
+	result, err := retry.Do[*uint256.Int](r.ctx, r.maxAttempts, r.strategy, func() (*uint256.Int, error) {
 		ctx, cancel := context.WithTimeout(r.ctx, r.timeout)
 		defer cancel()
 		var result hexutil.U256
 		err := r.client.CallContext(ctx, &result, "eth_getBalance", addr, r.blockHash)
 		return (*uint256.Int)(&result), err
 	})
+	log.Printf("[RPC] eth_getBalance completed in %v, err=%v", time.Since(start), err)
+	return result, err
 }
 
 func (r *RPCSource) StorageAt(addr common.Address, key common.Hash) (common.Hash, error) {
-	return retry.Do[common.Hash](r.ctx, r.maxAttempts, r.strategy, func() (common.Hash, error) {
+	start := time.Now()
+	log.Printf("[RPC] eth_getStorageAt addr=%s key=%s", addr.Hex(), key.Hex())
+	result, err := retry.Do[common.Hash](r.ctx, r.maxAttempts, r.strategy, func() (common.Hash, error) {
 		ctx, cancel := context.WithTimeout(r.ctx, r.timeout)
 		defer cancel()
 		var result common.Hash
 		err := r.client.CallContext(ctx, &result, "eth_getStorageAt", addr, key, r.blockHash)
 		return result, err
 	})
+	log.Printf("[RPC] eth_getStorageAt completed in %v, err=%v", time.Since(start), err)
+	return result, err
 }
 
 func (r *RPCSource) Code(addr common.Address) ([]byte, error) {
-	return retry.Do[[]byte](r.ctx, r.maxAttempts, r.strategy, func() ([]byte, error) {
+	start := time.Now()
+	log.Printf("[RPC] eth_getCode addr=%s blockHash=%s", addr.Hex(), r.blockHash.Hex())
+	result, err := retry.Do[[]byte](r.ctx, r.maxAttempts, r.strategy, func() ([]byte, error) {
 		ctx, cancel := context.WithTimeout(r.ctx, r.timeout)
 		defer cancel()
+		// Use json.RawMessage to handle RSK's null response for addresses with no code.
+		// RSK returns null instead of "0x" when querying eth_getCode by block hash.
+		var raw json.RawMessage
+		err := r.client.CallContext(ctx, &raw, "eth_getCode", addr, r.blockHash)
+		if err != nil {
+			return nil, err
+		}
+		// Check for null response (RSK returns null for addresses with no code)
+		if len(raw) == 0 || string(raw) == "null" {
+			return []byte{}, nil
+		}
+		// Parse the hex string
 		var result hexutil.Bytes
-		err := r.client.CallContext(ctx, &result, "eth_getCode", addr, r.blockHash)
-		return result, err
+		if err := json.Unmarshal(raw, &result); err != nil {
+			return nil, err
+		}
+		return result, nil
 	})
+	log.Printf("[RPC] eth_getCode completed in %v, err=%v, len(code)=%d", time.Since(start), err, len(result))
+	return result, err
 }
 
 // Close stops any ongoing RPC requests by cancelling the RPC context

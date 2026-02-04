@@ -610,6 +610,9 @@ func (m *SimpleTxManager) signWithNextNonce(ctx context.Context, txMessage types
 		x.Nonce = *m.nonce
 	case *types.BlobTx:
 		x.Nonce = *m.nonce
+	case *types.LegacyTx:
+		// Added for RSKj/pre-EIP-1559 chain compatibility - legacy txs need nonce set too
+		x.Nonce = *m.nonce
 	default:
 		return nil, fmt.Errorf("unrecognized tx type: %T", x)
 	}
@@ -786,6 +789,18 @@ func (m *SimpleTxManager) publishTx(ctx context.Context, tx *types.Transaction, 
 		case errStringMatch(err, txpool.ErrAlreadyKnown):
 			l.Warn("resubmitted already known transaction", "err", err)
 			m.metr.TxPublished("tx_already_known")
+			return tx, true, nil
+		case strings.Contains(err.Error(), "transaction wasn't mined"):
+			// RSKj returns this error for transactions that are actually pending in mempool.
+			// Treat it like ErrAlreadyKnown - the tx might be pending, so wait for it.
+			l.Warn("RSKj reports transaction wasn't mined (treating as pending)", "err", err)
+			m.metr.TxPublished("rsk_tx_pending")
+			return tx, true, nil
+		case strings.Contains(err.Error(), "pending transaction with same hash already exists"):
+			// RSKj returns this when resubmitting a transaction that's already in the mempool.
+			// This is RSKj's equivalent of ErrAlreadyKnown.
+			l.Warn("RSKj reports transaction already pending (treating as known)", "err", err)
+			m.metr.TxPublished("rsk_tx_already_pending")
 			return tx, true, nil
 		case errStringMatch(err, txpool.ErrReplaceUnderpriced):
 			l.Warn("transaction replacement is underpriced", "err", err)

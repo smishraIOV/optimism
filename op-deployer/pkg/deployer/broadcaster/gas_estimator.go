@@ -6,6 +6,7 @@ import (
 	"math/big"
 
 	"github.com/ethereum-optimism/optimism/op-service/txmgr"
+	"github.com/ethereum/go-ethereum/ethclient"
 )
 
 var (
@@ -28,10 +29,32 @@ var (
 // DeployerGasPriceEstimator is a custom gas price estimator for use with op-deployer.
 // It pads the base fee by 50% and multiplies the suggested tip by 5 up to a max of
 // 50 gwei.
+// For pre-EIP-1559 chains (like RSK), it falls back to legacy gas price estimation.
 func DeployerGasPriceEstimator(ctx context.Context, client txmgr.ETHBackend) (*big.Int, *big.Int, *big.Int, *big.Int, error) {
 	chainHead, err := client.HeaderByNumber(ctx, nil)
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("failed to get block: %w", err)
+	}
+
+	// Handle pre-EIP-1559 chains (BaseFee is nil)
+	if chainHead.BaseFee == nil {
+		// Use legacy gas price for non-EIP-1559 chains
+		var gasPrice *big.Int
+		// Try to cast to ethclient.Client to access SuggestGasPrice
+		if ethClient, ok := client.(*ethclient.Client); ok {
+			gasPrice, err = ethClient.SuggestGasPrice(ctx)
+			if err != nil {
+				return nil, nil, nil, nil, fmt.Errorf("failed to get gas price: %w", err)
+			}
+		} else {
+			// Fallback to a reasonable default gas price (60 Mwei, works for RSK)
+			gasPrice = big.NewInt(60000000)
+		}
+		// Pad the gas price by 50%
+		gasPricePad := new(big.Int).Div(gasPrice, baseFeePadFactor)
+		paddedGasPrice := new(big.Int).Add(gasPrice, gasPricePad)
+		// For legacy transactions, tip and baseFee are both set to the gas price
+		return paddedGasPrice, paddedGasPrice, dummyBlobTipCap, dummyBlobFee, nil
 	}
 
 	tip, err := client.SuggestGasTipCap(ctx)
